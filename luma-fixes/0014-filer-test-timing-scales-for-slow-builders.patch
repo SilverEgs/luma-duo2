@@ -1,7 +1,7 @@
-diff --git a/patches/nautilus/0000-luma-fedora-spec.patch b/patches/nautilus/0000-luma-fedora-spec.patch
---- a/patches/nautilus/0000-luma-fedora-spec.patch
-+++ b/patches/nautilus/0000-luma-fedora-spec.patch
-@@ -178,7 +178,7 @@
+diff --git a/packaging/nautilus/filer-spec-complete.patch b/packaging/nautilus/filer-spec-complete.patch
+--- a/packaging/nautilus/filer-spec-complete.patch
++++ b/packaging/nautilus/filer-spec-complete.patch
+@@ -232,7 +232,7 @@
  +filer_test_root=$(mktemp -d)
  +mkdir -p "$filer_test_root/config" "$filer_test_root/data" "$filer_test_root/cache" "$filer_test_root/runtime"
  +chmod 0700 "$filer_test_root/runtime"
