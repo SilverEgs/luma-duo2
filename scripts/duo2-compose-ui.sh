@@ -219,6 +219,10 @@ journalctl --root="$rootfs" --update-catalog
 
 # greetd owns the panels now; the bring-up Weston service is retired.
 rm -f "$rootfs/etc/systemd/system/multi-user.target.wants/luma-duo2-weston.service"
+# gnome-shell (for Settings) requires gdm-libs, which Fedora 44 ships in gdm
+# itself: keep it installed but not as the display manager; greetd is.
+[ -e "$rootfs/usr/lib/systemd/system/gdm.service" ] && systemctl --root="$rootfs" disable gdm.service
+rm -f "$rootfs/etc/systemd/system/display-manager.service"
 for unit in NetworkManager.service bluetooth.service chronyd.service greetd.service \
         ModemManager.service sshd.service luma-clock-restore.service luma-clock-save.timer; do
     [ -e "$rootfs/usr/lib/systemd/system/$unit" ] && systemctl --root="$rootfs" enable "$unit"
