@@ -42,7 +42,13 @@ if ! docker container inspect "$NAME" >/dev/null 2>&1; then
     # runs cargo itself and links PAM).
     docker exec "$NAME" bash -c 'dnf -y -q install rpm-build dnf-plugins-core \
         git curl tar xz bzip2 patch which findutils diffutils make \
-        cargo rust pam-devel >/dev/null'
+        cargo rust pam-devel meson ninja-build desktop-file-utils >/dev/null
+        # The FP6 Stevia keyboard builds with meson outside rpmbuild.
+        dnf -y -q install "pkgconfig(dconf)" "pkgconfig(gnome-desktop-3.0)" "pkgconfig(gtk+-wayland-3.0)" \
+            "pkgconfig(gmobile)" "pkgconfig(hunspell)" "pkgconfig(json-glib-1.0)" "pkgconfig(uim)" \
+            "pkgconfig(gsettings-desktop-schemas)" "pkgconfig(libsystemd)" "pkgconfig(xkbcommon)" \
+            "pkgconfig(wayland-protocols)" "pkgconfig(libfeedback-0.0)" wayland-devel appstream fzf gi-docgen python3-docutils \
+            words hunspell-en-US xorg-x11-server-Xvfb xorg-x11-xauth >/dev/null'
 fi
 [ "$(docker inspect --format '{{.State.Running}}' "$NAME")" = true ] || docker start "$NAME" >/dev/null
 
@@ -64,7 +70,7 @@ ensure_host_container() {
             -v "$(command -v docker):/usr/local/bin/docker:ro" \
             "$img" sleep infinity >/dev/null
         docker exec "$HOSTNAME_C" bash -c 'dnf -y -q install rpm cpio rpm-build \
-            dnf5-plugins git curl patch tar xz zstd findutils diffutils >/dev/null'
+            dnf5-plugins git curl patch tar xz zstd findutils diffutils ripgrep >/dev/null'
     fi
     [ "$(docker inspect --format '{{.State.Running}}' "$HOSTNAME_C")" = true ] \
         || docker start "$HOSTNAME_C" >/dev/null
@@ -136,6 +142,7 @@ for builder in "$@"; do
     [ -f "$LUMA/scripts/$rel" ] || die "no $rel in Luma's scripts"
     install_jobs_shim
     log="$LOGS/${builder%.sh}.log"
+    mkdir -p "$(dirname "$log")"
     # The spec(s) a builder installs into SPECS/ -- their BuildRequires are
     # what dnf builddep needs to satisfy before rpmbuild can run.
     mapfile -t specs < <(grep -oE 'packaging/rpm/[A-Za-z0-9._+-]+\.spec' \
@@ -182,13 +189,29 @@ for builder in "$@"; do
                     PATH="$LUMA_DUO2_ROOT/tools/podman-docker:/usr/local/bin:/usr/bin:/bin" \
                     "${target_env[@]}" \
                     bash "$LUMA/scripts/$rel"; }
+    elif [ "$force_arch" = x86_64 ]; then
+        # Builds on an x86_64 machine for the phone (the keyboard decoder
+        # cross-compiles with Zig): run it in the Fedora x86_64 host itself.
+        ensure_host_container
+        mode="x86_64 host ($HOSTNAME_C)"
+        run() { docker exec -w "$LUMA" "$HOSTNAME_C" bash "$LUMA/scripts/$rel"; }
     else
         # Expects to run on the aarch64 builder itself.
         mode="native (in $NAME)"
         run() { docker exec -w /luma "$NAME" bash -c '
                     set -euo pipefail
                     for s in "${@:2}"; do dnf -y -q builddep "$s"; done
-                    bash "$1"
+                    # Builders that rebuild a pinned Fedora source package
+                    # (Weston) need its build requirements too.
+                    if grep -q "build/sources/" "$1"; then
+                        for s in /luma/build/sources/*.src.rpm; do
+                            [ -f "$s" ] && dnf -y -q builddep "$s"
+                        done
+                    fi
+                    # Luma runs these on the phone, inside its session: give
+                    # GTK tests a display and a runtime directory here.
+                    export XDG_RUNTIME_DIR="$(mktemp -d)"; chmod 700 "$XDG_RUNTIME_DIR"
+                    xvfb-run -a --server-args="-screen 0 1600x1200x24" bash "$1"
                     ' _ "$script" "${specs[@]}"; }
     fi
     info "$builder: $mode"
