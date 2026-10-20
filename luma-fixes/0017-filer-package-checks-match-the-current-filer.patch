@@ -1,0 +1,17 @@
+diff --git a/scripts/mobile/build-luma-filer-fp6.sh b/scripts/mobile/build-luma-filer-fp6.sh
+--- a/scripts/mobile/build-luma-filer-fp6.sh
++++ b/scripts/mobile/build-luma-filer-fp6.sh
+@@ -56,9 +56,11 @@
+ (
+   cd "$verify_dir"
+   rpm2cpio "$main_rpm" | cpio -idm --quiet
+-  grep -aFq 'You’ve reached the system root' usr/bin/nautilus
++  # The system-root warning was retitled in 0051, the installer interface
++  # moved to version 2.
++  grep -aFq 'This is where Luma lives' usr/bin/nautilus
+   grep -aFq 'personal-storage-only' usr/bin/nautilus
+-  grep -aFq 'org.projectluma.ApplicationInstaller1' usr/bin/nautilus
++  grep -aFq 'org.projectluma.ApplicationInstaller2' usr/bin/nautilus
+   grep -aFq 'RequestInstall' usr/bin/nautilus
+   glib-compile-schemas usr/share/glib-2.0/schemas
+   test "$(GSETTINGS_SCHEMA_DIR=usr/share/glib-2.0/schemas \
