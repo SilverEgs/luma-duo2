@@ -1,0 +1,27 @@
+diff --git a/scripts/mobile/build-luma-android-runtime-fp6.sh b/scripts/mobile/build-luma-android-runtime-fp6.sh
+--- a/scripts/mobile/build-luma-android-runtime-fp6.sh
++++ b/scripts/mobile/build-luma-android-runtime-fp6.sh
+@@ -78,7 +78,9 @@
+     usr/lib/python3*/site-packages/luma_android/engine.py
+   grep -Fq 'sys.boot_completed' \
+     usr/lib/python3*/site-packages/luma_android/engine.py
+-  grep -Fq '"container", "unfreeze"' \
++  # The engine unfreezes through Waydroid's D-Bus container manager now,
++  # or through the container CLI as before.
++  grep -Eq '"container", "unfreeze"|ContainerManager\.Unfreeze' \
+     usr/lib/python3*/site-packages/luma_android/engine.py
+   grep -Fq 'gpu-fault-latched' \
+     usr/lib/python3*/site-packages/luma_android/engine.py
+@@ -128,8 +130,10 @@
+     usr/lib/python3*/site-packages/luma_android/engine.py
+   grep -Fq '"--no-resizeable"' \
+     usr/libexec/luma-waydroid-fp6-software-compositor
+-  ! grep -Fq '"+dynamic-resolution"' \
+-    usr/lib/python3*/site-packages/luma_android/engine.py
++  # Never passed to the viewer: the engine names it only to reject a viewer
++  # started with it.
++  ! grep -F '"+dynamic-resolution"' \
++    usr/lib/python3*/site-packages/luma_android/engine.py | grep -Fqv 'not in command'
+   test -x usr/libexec/luma-waydroid-fp6-software-compositor
+   test -f usr/lib/systemd/user/luma-android-fp6-software-compositor.service
+   grep -Fqx 'PrivateDevices=yes' \

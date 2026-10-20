@@ -1,0 +1,45 @@
+diff --git a/patches/nautilus/0000-luma-fedora-spec.patch b/patches/nautilus/0000-luma-fedora-spec.patch
+--- a/patches/nautilus/0000-luma-fedora-spec.patch
++++ b/patches/nautilus/0000-luma-fedora-spec.patch
+@@ -178,7 +178,7 @@
+ +filer_test_root=$(mktemp -d)
+ +mkdir -p "$filer_test_root/config" "$filer_test_root/data" "$filer_test_root/cache" "$filer_test_root/runtime"
+ +chmod 0700 "$filer_test_root/runtime"
+-+XDG_RUNTIME_DIR="$filer_test_root/runtime" XDG_CONFIG_HOME="$filer_test_root/config" XDG_DATA_HOME="$filer_test_root/data" XDG_CACHE_HOME="$filer_test_root/cache" GSK_RENDERER=cairo GIO_USE_VOLUME_MONITOR=unix xvfb-run -a -s "-screen 0 1920x1080x24" dbus-run-session -- meson test -C %{_vpath_builddir} --no-rebuild --print-errorlogs test-properties-about test-filename-common-prefix test-filename-utilities test-luma-empty-picker test-portal-file-chooser test-luma-column-view-zoom test-luma-column-header-menu
+++XDG_RUNTIME_DIR="$filer_test_root/runtime" XDG_CONFIG_HOME="$filer_test_root/config" XDG_DATA_HOME="$filer_test_root/data" XDG_CACHE_HOME="$filer_test_root/cache" GSK_RENDERER=cairo GIO_USE_VOLUME_MONITOR=unix xvfb-run -a -s "-screen 0 1920x1080x24" dbus-run-session -- meson test -C %{_vpath_builddir} --timeout-multiplier ${LUMA_TEST_TIME_SCALE:-1} --no-rebuild --print-errorlogs test-properties-about test-filename-common-prefix test-filename-utilities test-luma-empty-picker test-portal-file-chooser test-luma-column-view-zoom test-luma-column-header-menu
+ +rm -rf "$filer_test_root"
+  desktop-file-validate $RPM_BUILD_ROOT%{_datadir}/applications/*.desktop
+  
+diff --git a/patches/nautilus/0033-luma-native-about-file-dialog.patch b/patches/nautilus/0033-luma-native-about-file-dialog.patch
+--- a/patches/nautilus/0033-luma-native-about-file-dialog.patch
++++ b/patches/nautilus/0033-luma-native-about-file-dialog.patch
+@@ -1409,7 +1409,7 @@
+ +
+ +static void spin (guint milliseconds)
+ +{
+-+    gint64 end=g_get_monotonic_time()+milliseconds*1000;
+++    gint64 end=g_get_monotonic_time()+(gint64)(milliseconds*1000*(g_getenv("LUMA_TEST_TIME_SCALE")?MAX(1.0,g_ascii_strtod(g_getenv("LUMA_TEST_TIME_SCALE"),NULL)):1.0));
+ +    do {while(g_main_context_iteration(NULL,FALSE));g_usleep(1000);} while(g_get_monotonic_time()<end);
+ +}
+ +static GtkWidget *find (GtkWidget *root,const char *id)
+diff --git a/patches/nautilus/0151-filer-creator-preview-surfaces.patch b/patches/nautilus/0151-filer-creator-preview-surfaces.patch
+--- a/patches/nautilus/0151-filer-creator-preview-surfaces.patch
++++ b/patches/nautilus/0151-filer-creator-preview-surfaces.patch
+@@ -794,7 +794,7 @@
+ +    gtk_adjustment_set_value(adjustment,0);spin(200);
+ +    g_source_remove(heartbeat);
+ +    g_test_message("Applications cold-load and scroll heartbeat: %u ticks; maximum interval %.2fms",probe.ticks,probe.maximum/1000.0);
+-+    g_assert_cmpuint(probe.ticks,>,40);g_assert_cmpint(probe.maximum,<,250000);
+++    g_assert_cmpuint(probe.ticks,>,40);g_assert_cmpint(probe.maximum,<,(gint64)(250000*(g_getenv("LUMA_TEST_TIME_SCALE")?MAX(1.0,g_ascii_strtod(g_getenv("LUMA_TEST_TIME_SCALE"),NULL)):1.0)));
+ +    GtkWidget *cell=find_css(grid,"nautilus-view-cell");g_assert_nonnull(cell);
+ +    GtkWidget *face=required(cell,"icon");graphene_rect_t face_bounds;
+ +    GtkWidget *hover_card=gtk_widget_get_parent(cell);
+@@ -891,7 +891,7 @@
+ +    g_autoptr(NautilusIconInfo) info=nautilus_icon_info_lookup(G_ICON(slow),64,1);
+ +    gint64 elapsed=g_get_monotonic_time()-begin;
+ +    g_test_message("Uncached slow icon lookup GTK-thread time: %.2fms",elapsed/1000.0);
+-+    g_assert_cmpint(elapsed,<,100000);
+++    g_assert_cmpint(elapsed,<,(gint64)(100000*(g_getenv("LUMA_TEST_TIME_SCALE")?MAX(1.0,g_ascii_strtod(g_getenv("LUMA_TEST_TIME_SCALE"),NULL)):1.0)));
+ +    g_autoptr(GdkPaintable) art=nautilus_icon_info_get_paintable(info);
+ +    gboolean ready=FALSE;g_signal_connect(art,"invalidate-contents",G_CALLBACK(invalidated),&ready);
+ +    NautilusImage *view=nautilus_image_new();nautilus_image_set_size(view,64);

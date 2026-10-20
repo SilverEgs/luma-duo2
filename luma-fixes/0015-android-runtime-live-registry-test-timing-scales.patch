@@ -1,0 +1,46 @@
+diff --git a/src/luma-android/tests/test_live_registry.py b/src/luma-android/tests/test_live_registry.py
+--- a/src/luma-android/tests/test_live_registry.py
++++ b/src/luma-android/tests/test_live_registry.py
+@@ -10,6 +10,9 @@
+ from luma_android.live_registry import bounded_output, parse_live_packages, MAX_APPS
+ from luma_android.engine import WaydroidEngine
+ 
++# Slow builders (emulation) start a Python child in more than these budgets.
++SCALE=max(1.0,float(os.environ.get('LUMA_TEST_TIME_SCALE','1')))
++
+ 
+ def record(package='org.example.App', name='Example'):
+     return f'Name: {name}\npackageName: {package}\ncategories:\n\tandroid.intent.category.LAUNCHER\n'
+@@ -46,7 +49,7 @@
+             with self.assertRaises(RuntimeUnavailableError):engine.live_launchable_packages()
+ 
+     def run_child(self, body, timeout=2):
+-        return bounded_output([sys.executable,'-I','-c',body],timeout)
++        return bounded_output([sys.executable,'-I','-c',body],timeout*SCALE)
+ 
+     def test_real_pipes_success_exit_encoding_and_stream_bounds(self):
+         self.assertEqual(self.run_child('print("fresh")'), 'fresh\n')
+@@ -72,7 +75,7 @@
+         before=time.monotonic()
+         with self.assertRaises(RuntimeUnavailableError):
+             self.run_child('import os,time;os.close(1);os.close(2);time.sleep(20)', .25)
+-        self.assertLess(time.monotonic()-before,2)
++        self.assertLess(time.monotonic()-before,2*SCALE)
+ 
+     def test_real_timeout_reaps_child_and_pipe_holding_descendant(self):
+         with tempfile.TemporaryDirectory() as directory:
+@@ -80,12 +83,12 @@
+             body=f'import os,time;from pathlib import Path;Path({str(pidfile)!r}).write_text(str(os.getpid()));time.sleep(20)'
+             before=time.monotonic()
+             with self.assertRaises(RuntimeUnavailableError):self.run_child(body,.25)
+-            self.assertLess(time.monotonic()-before,2)
++            self.assertLess(time.monotonic()-before,2*SCALE)
+             self.assertFalse(Path('/proc/'+pidfile.read_text()).exists())
+             body='import os,time;pid=os.fork();os._exit(0) if pid else time.sleep(20)'
+             before=time.monotonic()
+             with self.assertRaises(RuntimeUnavailableError):self.run_child(body,.25)
+-            self.assertLess(time.monotonic()-before,2)
++            self.assertLess(time.monotonic()-before,2*SCALE)
+ 
+ 
+ if __name__=='__main__':unittest.main()
