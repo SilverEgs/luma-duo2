@@ -1,0 +1,27 @@
+diff --git a/patches/gnome-control-center/0082-settings-retain-native-pane-actions.patch b/patches/gnome-control-center/0082-settings-retain-native-pane-actions.patch
+--- a/patches/gnome-control-center/0082-settings-retain-native-pane-actions.patch
++++ b/patches/gnome-control-center/0082-settings-retain-native-pane-actions.patch
+@@ -2281,10 +2281,20 @@
+      cc_luma_view_report_error (v, error);
+ --- a/shell/cc-luma-view.c
+ +++ b/shell/cc-luma-view.c
+-@@ -1548,6 +1548,7 @@
++@@ -1548,6 +1548,15 @@
+  /* Phone width changes some pages' anatomy (v70 #w-settings.phone rules). */
+- static void phone_applied (View *v) { if (!v->phone) { v->phone = TRUE; cc_luma_view_queue_refresh (v); } }
+- static void phone_unapplied (View *v) { if (v->phone) { v->phone = FALSE; cc_luma_view_queue_refresh (v); } }
++-static void phone_applied (View *v) { if (!v->phone) { v->phone = TRUE; cc_luma_view_queue_refresh (v); } }
++-static void phone_unapplied (View *v) { if (v->phone) { v->phone = FALSE; cc_luma_view_queue_refresh (v); } }
+++/* Rebuild ahead of the next frame: a default idle runs after the redraw when
+++ * that frame is already due, laying the old anatomy out at the new width. */
+++static void phone_refresh (View *v)
+++{
+++  cc_luma_view_queue_refresh (v);
+++  if (v->refresh) g_source_remove (v->refresh);
+++  v->refresh = g_idle_add_full (G_PRIORITY_HIGH_IDLE, refresh_view, v, NULL);
+++}
+++static void phone_applied (View *v) { if (!v->phone) { v->phone = TRUE; phone_refresh (v); } }
+++static void phone_unapplied (View *v) { if (v->phone) { v->phone = FALSE; phone_refresh (v); } }
+ +static void live_write_error (CcLumaFixture *model, const GError *error, GtkWidget *root);
+  static GtkWidget *new_view (CcLumaFixture *model, const char *page, CcLumaLiveLock *live_lock, CcLumaLivePermission *live_permission, GError **error)
+  {
