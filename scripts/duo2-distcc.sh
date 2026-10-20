@@ -36,7 +36,8 @@ docker start "$SERVER" >/dev/null
 
 # Compiler names the builders send (gcc, cc, g++, c++, and Fedora's triplet
 # names), each the cross compiler minus annobin.
-docker exec -i "$SERVER" sh -c 'mkdir -p /usr/local/libexec/duo2-cross && cat > /usr/local/libexec/duo2-cross/wrapper' <<'EOF'
+docker exec -i "$SERVER" sh -c 'mkdir -p /usr/local/libexec/duo2-cross && cat > /usr/local/libexec/duo2-cross/wrapper.new &&
+    chmod 755 /usr/local/libexec/duo2-cross/wrapper.new && mv -f /usr/local/libexec/duo2-cross/wrapper.new /usr/local/libexec/duo2-cross/wrapper' <<'EOF'
 #!/bin/sh
 case "${0##*/}" in
     *g++|*c++) real=/usr/bin/aarch64-linux-gnu-g++ ;;
@@ -58,7 +59,9 @@ docker exec "$SERVER" sh -c 'cd /usr/local/libexec/duo2-cross && chmod 755 wrapp
     # server has no native compiler, so those paths are the cross wrapper too.
     for n in gcc cc g++ c++ aarch64-redhat-linux-gcc aarch64-redhat-linux-g++ aarch64-redhat-linux-c++; do
         ln -sf /usr/local/libexec/duo2-cross/wrapper "/usr/bin/$n"; done'
-docker exec "$SERVER" sh -c 'pkill -x distccd; for i in 1 2 3 4 5 6 7 8 9 10; do pgrep -x distccd >/dev/null || break; sleep 1; done
+# A running server is left alone (builds may be using it); --recreate
+# starts a fresh one.
+docker exec "$SERVER" sh -c 'pgrep -x distccd >/dev/null ||
     DISTCCD_PATH=/usr/local/libexec/duo2-cross distccd --daemon --enable-tcp-insecure \
         --allow 172.16.0.0/12 --listen 0.0.0.0 --jobs "$(nproc)" --log-file /tmp/distccd.log --log-level info'
 
@@ -77,7 +80,10 @@ for c in "${CLIENTS[@]}"; do
     # two on every compile: redhat-hardened-cc1, which only adds -fPIE when
     # no other PIC/PIE option (or -r) is given -- stated here instead, same
     # code -- and redhat-annobin-cc1, the annobin plugin, dropped as above.
-    docker exec -i "$c" sh -c 'cat > /usr/local/libexec/duo2-distcc && chmod 755 /usr/local/libexec/duo2-distcc' <<'WRAP'
+    # Replaced by rename, never rewritten in place: compiles running now
+    # keep executing the old file instead of failing with "text file busy".
+    docker exec -i "$c" sh -c 'cat > /usr/local/libexec/duo2-distcc.new && chmod 755 /usr/local/libexec/duo2-distcc.new &&
+        mv -f /usr/local/libexec/duo2-distcc.new /usr/local/libexec/duo2-distcc' <<'WRAP'
 #!/bin/sh
 pie=1
 for a in "$@"; do
