@@ -93,6 +93,15 @@ mapfile -t luma_rpms < <(find /luma/build/packages -name "work.*" -prune -o -nam
 # The Duo 2 rebuilds of Fedora packages, without their -devel parts.
 mapfile -t duo2_rpms < <(find /duo2-rpms -name "*.duo2.*.rpm" ! -name "*-devel-*" | sort)
 luma_rpms+=("${duo2_rpms[@]}")
+# The FP6 application bundles (Filer, Weston RDP, Android runtime) are RPMs
+# in their own bundle directories, as compose-fp6-rootfs.sh takes them.
+apps=/luma/build/mobile/fp6-physical/luma-apps-aarch64
+for bundle in filer android-runtime weston-rdp-native-touch; do
+    ls "$apps/$bundle/bundle/"*.rpm >/dev/null 2>&1 || { echo "missing FP6 bundle: $bundle" >&2; exit 1; }
+done
+mapfile -t bundle_rpms < <(find "$apps"/*/bundle -maxdepth 1 -name "*.rpm" ! -name "*.src.rpm" \
+    ! -name "*-debuginfo-*" ! -name "*-debugsource-*" ! -name "*-devel-*" | sort)
+luma_rpms+=("${bundle_rpms[@]}")
 echo "Luma packages: ${#luma_rpms[@]}"
 printf "    %s\n" "${luma_rpms[@]##*/}"
 
@@ -144,6 +153,28 @@ dconf compile "$rootfs/etc/dconf/db/luma" "$rootfs/etc/dconf/db/luma.d"
 tar -C /overlay -cf - . | tar -C "$rootfs" -xf - --no-same-owner --no-overwrite-dir
 # and none of it group- or world-writable, whatever the umask of the checkout.
 (cd /overlay && find . -mindepth 1 -print0) | (cd "$rootfs" && xargs -0 chmod go-w)
+
+# --- Keyboard, Stevia and the power key, as prepare-fp6-p5-candidate.sh ----
+fp6build=/luma/build/mobile/fp6-physical
+for f in luma-keyboard-aarch64/luma-latinime-decoder luma-keyboard-aarch64/main_en.dict \
+        luma-stevia-aarch64/luma-phosh-osk-stevia; do
+    [ -s "$fp6build/$f" ] || { echo "missing FP6 build output: $f" >&2; exit 1; }
+done
+install -D -m 0755 "$fp6build/luma-keyboard-aarch64/luma-latinime-decoder" "$rootfs/usr/libexec/luma-latinime-decoder"
+install -D -m 0644 "$fp6build/luma-keyboard-aarch64/main_en.dict" "$rootfs/usr/share/luma-keyboard/main_en.dict"
+install -D -m 0755 /luma/src/luma-keyboard/luma_ibus_engine.py "$rootfs/usr/libexec/luma-ibus-latinime"
+install -D -m 0644 /luma/src/luma-keyboard/luma-latinime.xml "$rootfs/usr/share/ibus/component/luma-latinime.xml"
+install -D -m 0755 "$fp6build/luma-stevia-aarch64/luma-phosh-osk-stevia" "$rootfs/usr/local/libexec/luma-phosh-osk-stevia"
+install -D -m 0644 /luma/config/mobile/fp6-physical/overlay/etc/systemd/user/mobi.phosh.OSK.service.d/50-luma-completion.conf \
+    "$rootfs/etc/systemd/user/mobi.phosh.OSK.service.d/50-luma-completion.conf"
+install -D -m 0755 /luma/extensions/luma-handheld/luma-power-key-broker.py "$rootfs/usr/libexec/luma-power-key-broker"
+install -D -m 0644 /luma/extensions/luma-handheld/luma-power-key-broker.service \
+    "$rootfs/usr/lib/systemd/user/luma-power-key-broker.service"
+install -D -m 0644 /luma/config/mobile/fp6-physical/overlay/usr/lib/systemd/user/luma-shell-session.target \
+    "$rootfs/usr/lib/systemd/user/luma-shell-session.target"
+install -d -m 0755 "$rootfs/usr/lib/systemd/user/luma-shell-session.target.wants"
+ln -sfn ../luma-power-key-broker.service \
+    "$rootfs/usr/lib/systemd/user/luma-shell-session.target.wants/luma-power-key-broker.service"
 
 # --- The rest of the handheld system, as compose-fp6-rootfs.sh ------------
 printf "handheld\n" > "$rootfs/etc/luma-device-class"
