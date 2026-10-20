@@ -102,6 +102,15 @@ done
 mapfile -t bundle_rpms < <(find "$apps"/*/bundle -maxdepth 1 -name "*.rpm" ! -name "*.src.rpm" \
     ! -name "*-debuginfo-*" ! -name "*-debugsource-*" ! -name "*-devel-*" | sort)
 luma_rpms+=("${bundle_rpms[@]}")
+# One copy of each package: Filer bundles the same Nautilus RPMs the
+# Nautilus build left in build/packages.
+declare -A seen_rpm=()
+unique=()
+for r in "${luma_rpms[@]}"; do
+    [ -n "${seen_rpm[${r##*/}]:-}" ] && continue
+    seen_rpm[${r##*/}]=1; unique+=("$r")
+done
+luma_rpms=("${unique[@]}")
 echo "Luma packages: ${#luma_rpms[@]}"
 printf "    %s\n" "${luma_rpms[@]##*/}"
 
@@ -200,6 +209,9 @@ INSTALL_AUTHORIZED=false
 EOR
 grep -q "^luma-display:" "$rootfs/etc/group" || groupadd --root "$rootfs" --system luma-display
 usermod --root "$rootfs" --append --groups luma-display,audio,video luma
+# Emulated useradd cannot copy /etc/skel (it leaves an empty .bashrc).
+cp -rT "$rootfs/etc/skel" "$rootfs/home/luma"
+chown -R 1000:1000 "$rootfs/home/luma"
 install -d -m 0755 "$rootfs/var/lib/dbus"
 ln -sfn /etc/machine-id "$rootfs/var/lib/dbus/machine-id"
 systemd-hwdb --root="$rootfs" update

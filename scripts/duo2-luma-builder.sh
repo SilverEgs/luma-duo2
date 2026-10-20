@@ -105,6 +105,7 @@ for r in "$@"; do
     q=$(rpm -qp --qf '%{NAME} %{VERSION}-%{RELEASE}.%{ARCH}' "$r" 2>/dev/null) || continue
     set -- $q
     pkgdir=$(echo "$r" | sed -E 's|(/build/packages/[^/]+)/.*|\1|')
+    case " ${rpms[*]##*/} " in *" $1-devel-$2.rpm "*) continue ;; esac
     while IFS= read -r d; do rpms+=("$d"); done < <(find "$pkgdir" -path '*/rpmbuild/RPMS/*' \
         -name "$1-devel-$2.rpm" 2>/dev/null | head -1)
 done
