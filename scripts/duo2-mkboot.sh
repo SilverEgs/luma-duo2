@@ -50,10 +50,16 @@ STOCK_VENDOR_BOOT="$STOCK/vendor_boot_b.img"
 VENDOR=0 STOCK_KERNEL=0 LUMA=0
 [ "${1:-}" = "--vendor" ] && VENDOR=1
 [ "${1:-}" = "--luma" ] && VENDOR=1 && LUMA=1
+# --luma-ostree: Luma's ARM nightly in the OSTree phone layout
+# (duo2-compose-ostree.sh), booted through Luma's OSTree initramfs archive
+# (duo2-mkinitramfs-ostree.sh).
+OSTREE=0
+[ "${1:-}" = "--luma-ostree" ] && VENDOR=1 && LUMA=1 && OSTREE=1
 [ "$VENDOR" -eq 1 ] && [ "${2:-}" = "--stock-kernel" ] && STOCK_KERNEL=1
 
 RAMDISK="$OUT/initramfs.cpio.gz"
 [ "$LUMA" -eq 1 ] && RAMDISK="${LUMA_DUO2_INITRAMFS_OUT:-$LUMA_DUO2_ROOT/../build/duo2-initramfs}/initramfs-luma"
+[ "$OSTREE" -eq 1 ] && RAMDISK="${LUMA_DUO2_INITRAMFS_OUT:-$LUMA_DUO2_ROOT/../build/duo2-initramfs}/initramfs-luma-ostree"
 if [ "$VENDOR" -eq 1 ]; then
     VTREE="${LUMA_DUO2_VENDOR_TREE:-$LUMA_DUO2_ROOT/../reference/msm-5.4}"
     KERNEL="$VTREE/out/target/product/duo2/obj/kernel/msm-5.4/arch/arm64/boot/Image"
@@ -87,6 +93,13 @@ qcom_dload_mode.download_mode=0 msm_poweroff.download_mode=0"
     # and windows open on it where no panel shows them. ":d" makes the DRM
     # probe helper report it disconnected to every compositor.
     CMDLINE="$CMDLINE video=Virtual-1:d"
+    # Luma's phone userdata image: the root and boot filesystems by the UUIDs
+    # every Luma phone image carries, and the aboot slot link the initramfs
+    # points at ostree's default deployment (androidboot.slot_suffix=_b).
+    # The first boot grows the root to fill userdata, so the way home waits
+    # longer for it (duo2.booted=, seconds).
+    [ "$OSTREE" -eq 1 ] && CMDLINE="$CMDLINE pmos_root_uuid=03797c05-cf87-4eda-adc4-6ce111baf2d3 \
+pmos_boot_uuid=032D-57AD ostree=/ostree/root.b duo2.booted=900"
 else
     CMDLINE_MODE=replace
     CMDLINE="console=ttyGS0,115200n8 reboot_mode.panic_mode=bootloader panic=-1 \
