@@ -1,5 +1,5 @@
 From: luma-duo2 bring-up
-Subject: [PATCH] mutter: inexact scales and true refresh on a handheld panel
+Subject: [PATCH] mutter: inexact scales, true refresh and per-panel backlights on a handheld
 
 The Duo 2's 1344x1892 panels want Android's density for them, scale 2.5,
 which does not divide them exactly, so Mutter never offers it. Adds
@@ -12,30 +12,35 @@ The panels' command-mode modes also carry a link clock that works out at
 43.57 Hz. Adds patches/mutter/0031 (trust the mode's vrefresh when the
 computed rate is more than a hertz off).
 
+Their backlights hang off the display controller, not their connectors, so
+both connectors drove the left panel's. Adds patches/mutter/0032 (a udev
+property, LUMA_BACKLIGHT_CONNECTOR, names a raw backlight's connector).
+
 diff --git a/patches/mutter/0000-luma-fedora-spec.patch b/patches/mutter/0000-luma-fedora-spec.patch
-index 651b1c40..4dadf60c 100644
+index 651b1c40..ec96c042 100644
 --- a/patches/mutter/0000-luma-fedora-spec.patch
 +++ b/patches/mutter/0000-luma-fedora-spec.patch
 @@ -1,11 +1,11 @@
  --- a/mutter.spec
  +++ b/mutter.spec
 -@@ -29,13 +29,44 @@
-+@@ -29,13 +29,46 @@
++@@ -29,13 +29,47 @@
   
   Name:          mutter
   Version:       50.4
  -Release:       %autorelease
 -+Release:       1.luma.20%{?dist}
-++Release:       1.luma.20.duo2.2%{?dist}
+++Release:       1.luma.20.duo2.3%{?dist}
   Summary:       Window and compositing manager based on Clutter
   
   # Automatically converted from old format: GPLv2+ - review is highly recommended.
-@@ -43,6 +43,8 @@
+@@ -43,6 +43,9 @@
  +Patch1026:     0027-cogl-Scissor-journal-draws-to-what-they-cover.patch
  +Patch1027:     0028-clutter-actor-Do-not-redraw-the-whole-stage-for-a-first-paint.patch
  +Patch1028:     0029-stage-impl-Clip-compact-damage-with-the-scissor-alone.patch
 ++Patch1029:     0030-monitor-Offer-inexact-scales-on-a-handheld-panel.patch
 ++Patch1030:     0031-kms-utils-Trust-the-modes-vertical-refresh-over-its-clock.patch
+++Patch1031:     0032-udev-Let-udev-name-a-raw-backlights-connector.patch
   
   
   BuildRequires: cvt
@@ -212,3 +217,42 @@ index 00000000..08f9fab9
 + }
 + 
 + int64_t
+diff --git a/patches/mutter/0032-udev-Let-udev-name-a-raw-backlights-connector.patch b/patches/mutter/0032-udev-Let-udev-name-a-raw-backlights-connector.patch
+new file mode 100644
+index 00000000..8b13e92a
+--- /dev/null
++++ b/patches/mutter/0032-udev-Let-udev-name-a-raw-backlights-connector.patch
+@@ -0,0 +1,33 @@
++From: none24smu <210309088+none24smu@users.noreply.github.com>
++Subject: [PATCH] udev: Let udev name a raw backlight's connector
++
++Mutter matches a raw backlight to its connector through the backlight's
++drm_connector parent. Qualcomm's downstream SDE driver registers each
++panel's backlight under the display controller instead, so on a phone with
++two panels (the Surface Duo 2) both connectors fell back to the first raw
++backlight: the left panel's slider drove both, and the right panel stayed
++at full brightness. A raw backlight carrying LUMA_BACKLIGHT_CONNECTOR (set
++by a udev rule) now belongs to the connector it names, and to no other.
++
++---
++diff --git a/src/backends/meta-udev.c b/src/backends/meta-udev.c
++--- a/src/backends/meta-udev.c
+++++ b/src/backends/meta-udev.c
++@@ -266,6 +266,17 @@
++       if (g_strcmp0 (prop, "raw") != 0)
++         continue;
++ 
+++      /* Some drivers (Qualcomm's downstream SDE) register each panel's raw
+++       * backlight under the display controller rather than its connector;
+++       * udev then names the connector it belongs to. */
+++      prop = g_udev_device_get_property (device, "LUMA_BACKLIGHT_CONNECTOR");
+++      if (prop)
+++        {
+++          if (g_strcmp0 (prop, connector_name) == 0)
+++            return g_object_ref (device);
+++          continue;
+++        }
+++
++       /* Raw backlight interfaces registered by the drm driver will have the
++        * drm-connector as their parent.
++        */

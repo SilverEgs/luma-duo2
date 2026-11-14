@@ -100,7 +100,7 @@ install -m 0644 "$SSHPUB" "$L/ssh/root_authorized_keys"
 # and the Shell from Luma's current tree, whose search no longer swallows the
 # on-screen keyboard's taps. Their files go over the nightly's in the layer;
 # the rpmdb still names the nightly's versions.
-UIRPMS="mutter/aarch64/RPMS/mutter-50.4-1.luma.20.duo2.2.fc44.aarch64.rpm
+UIRPMS="mutter/aarch64/RPMS/mutter-50.4-1.luma.20.duo2.3.fc44.aarch64.rpm
 gnome-shell/RPMS/aarch64/gnome-shell-50.3-1.luma.176.fc44.aarch64.rpm"
 for rpm in $UIRPMS; do
     [ -f "$LUMA/build/packages/$rpm" ] || die "no luma/build/packages/$rpm -- build it with duo2-luma-builder.sh"
@@ -117,6 +117,9 @@ install -D -m 0644 "$OVERLAY/usr/lib/udev/rules.d/70-luma-duo2-gpu.rules" \
     "$LAYER/usr/lib/udev/rules.d/70-luma-duo2-gpu.rules"
 install -D -m 0644 "$OVERLAY/usr/lib/udev/rules.d/90-luma-duo2-touch.rules" \
     "$LAYER/usr/lib/udev/rules.d/90-luma-duo2-touch.rules"
+# Which panel each backlight drives, for Luma's Mutter (mutter patch 0032).
+install -D -m 0644 "$OVERLAY/usr/lib/udev/rules.d/71-luma-duo2-backlight.rules" \
+    "$LAYER/usr/lib/udev/rules.d/71-luma-duo2-backlight.rules"
 # The unit's own two-panel alignment, copied from its sfpd partition at each
 # start (the file is per unit and never part of the image).
 install -D -m 0755 "$OVERLAY/usr/libexec/luma-duo2-touch-calibration" \

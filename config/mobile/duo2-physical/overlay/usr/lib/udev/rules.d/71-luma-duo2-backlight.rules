@@ -1,0 +1,7 @@
+# Surface Duo 2: which panel each backlight drives. Qualcomm's SDE registers
+# them under the display controller, numbered in connector order
+# (sde_connector.c: panel0 for the first DSI connector), not under their DRM
+# connectors, so Mutter cannot match them itself and would drive the left
+# panel's for both. Luma's Mutter reads this property (mutter patch 0032).
+SUBSYSTEM=="backlight", KERNEL=="panel0-backlight", ENV{LUMA_BACKLIGHT_CONNECTOR}="DSI-1"
+SUBSYSTEM=="backlight", KERNEL=="panel1-backlight", ENV{LUMA_BACKLIGHT_CONNECTOR}="DSI-2"
