@@ -1,0 +1,15 @@
+[Unit]
+Description=Qualcomm PD mapper service
+Documentation=https://github.com/none24smu/luma-duo2/blob/main/docs/modem.md
+# The *.jsn domain maps are on the mounted modem partition.
+Requires=luma-duo2-modem-setup.service
+After=luma-duo2-modem-setup.service
+Before=luma-duo2-modem.service
+
+[Service]
+ExecStart=/usr/bin/pd-mapper /run/luma-duo2/firmware/modem/image
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

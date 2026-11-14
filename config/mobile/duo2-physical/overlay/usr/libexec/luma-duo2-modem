@@ -1,0 +1,107 @@
+#!/bin/sh
+# Luma Duo 2: the SoC's cellular modem (MPSS) on Microsoft's 5.4 kernel
+# (docs/modem.md).
+#
+# Usage: luma-duo2-modem setup|ready
+#   setup  before the modem boots (luma-duo2-modem-setup.service)
+#   ready  once it has booted (ExecStartPost of luma-duo2-modem.service)
+#
+# setup:
+#  1. The MPSS firmware stays on the phone's own read-only modem partition,
+#     mounted at /run/luma-duo2/firmware/modem (shared with Wi-Fi,
+#     luma-duo2-radio-firmware.service); /usr/lib/firmware/modem.* link there.
+#  2. A modem crash restarts the modem alone instead of the whole phone
+#     (the subsystem default is SYSTEM, a full restart).
+#  3. The IPA, the modem's data path: until the device tree carries the fixed
+#     qcom,scaling-exceptions string list its probe fails; duo2_ipa_dtfix
+#     repairs the property and the driver is bound again. Then its firmware
+#     (ipa_fws) is loaded, as Android's ipa_fws.rc does with "write /dev/ipa 1".
+#
+# ready:
+#  4. ModemManager only takes a Qualcomm SoC modem together with a net port
+#     whose parent driver is "ipa"; Microsoft's rmnet_ipa0 has no parent.
+#     duo2_ipa_netparent gives it one, after the QMI services are up so that
+#     ModemManager probes both together (a udev rule re-applies it when
+#     rmnet_ipa re-creates the netdev after a modem restart).
+#  5. The GNSS engine emits only Qualcomm's proprietary NMEA until the
+#     standard sentences are selected; geoclue needs GGA and RMC. The
+#     setting would live in the modem's EFS, which rmtfs serves read-only,
+#     so it is applied at every modem start.
+set -u
+
+FW=/run/luma-duo2/firmware/modem
+IPA=1e00000.qcom,ipa
+IPADRV=/sys/bus/platform/drivers/ipa
+NETPARENT=/sys/module/duo2_ipa_netparent/parameters/reparent
+
+log() { echo "luma-duo2-modem: $*" >&2; }
+
+subsys() {   # name -> sysfs directory
+    for s in /sys/bus/msm_subsys/devices/*; do
+        [ "$(cat "$s/name" 2>/dev/null)" = "$1" ] && { echo "$s"; return 0; }
+    done
+    return 1
+}
+
+qrtr_has() {   # service id -> true once the modem (node 0) offers it
+    qrtr-lookup "$1" 2>/dev/null | awk -v s="$1" '$1 == s && $4 == 0 { f = 1 } END { exit !f }'
+}
+
+setup() {
+    slot=$(sed -n 's/.*androidboot\.slot_suffix=\(_[ab]\).*/\1/p' /proc/cmdline)
+    if ! mountpoint -q "$FW"; then
+        mkdir -p "$FW"
+        mount -t vfat -o ro,nosuid,nodev,noexec,shortname=lower,umask=0222 \
+            "/dev/disk/by-partlabel/modem$slot" "$FW" ||
+            { log "cannot mount modem$slot"; exit 1; }
+    fi
+    [ -f "$FW/image/modem.mdt" ] || { log "no modem.mdt on modem$slot"; exit 1; }
+
+    s=$(subsys modem) && echo RELATED >"$s/restart_level"
+
+    if [ ! -e "$IPADRV/$IPA" ]; then
+        modprobe duo2_ipa_dtfix && echo "$IPA" >"$IPADRV/bind" ||
+            log "IPA did not probe: no modem data (docs/modem.md)"
+    fi
+    if [ -e /dev/ipa ]; then
+        echo 1 >/dev/ipa
+        s=$(subsys ipa_fws)
+        for i in $(seq 30); do
+            [ "$(cat "$s/state" 2>/dev/null)" = ONLINE ] && break
+            sleep 1
+        done
+        [ "$(cat "$s/state" 2>/dev/null)" = ONLINE ] || log "IPA firmware not loaded"
+    fi
+    exit 0
+}
+
+ready() {
+    # DMS (2) and LOC (16) on the modem's node.
+    for i in $(seq 90); do
+        qrtr_has 2 && qrtr_has 16 && break
+        sleep 1
+    done
+    qrtr_has 2 || { log "modem QMI services did not appear"; exit 1; }
+
+    if modprobe duo2_ipa_netparent; then
+        for n in /sys/devices/virtual/net/rmnet_ipa*; do
+            [ -e "$n" ] && echo "${n##*/}" >"$NETPARENT"
+        done
+    else
+        log "no duo2_ipa_netparent: ModemManager will not take the modem"
+    fi
+
+    for i in 1 2 3 4 5; do
+        qmicli -d qrtr://0 --loc-set-nmea-types='gga|rmc|gsv|gsa|vtg' >/dev/null 2>&1 &&
+            exit 0
+        sleep 2
+    done
+    log "could not select the standard NMEA sentences"
+    exit 0
+}
+
+case "${1:-}" in
+setup) setup ;;
+ready) ready ;;
+*) echo "usage: luma-duo2-modem setup|ready" >&2; exit 2 ;;
+esac

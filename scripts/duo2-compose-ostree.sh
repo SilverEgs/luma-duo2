@@ -151,6 +151,33 @@ for unit in luma-duo2-radio-firmware luma-duo2-wlan luma-duo2-bluetooth; do
     ln -sf "../$unit.service" "$LAYER/usr/lib/systemd/system/multi-user.target.wants/$unit.service"
 done
 
+# Cellular modem and GNSS (docs/modem.md). libqrtr, tqftpserv and pd-mapper
+# come from duo2-build-modem.sh, which also adds duo2_ipa_dtfix and
+# duo2_ipa_netparent to $MODULES after duo2-stage-modules.sh. The layer is
+# committed over the base tree, so the patched libqrtr replaces Fedora's.
+MODEM="$BUILD/duo2-modem"
+[ -x "$MODEM/usr/bin/pd-mapper" ] || die "no $MODEM -- run duo2-build-modem.sh"
+ls "$MODULES"/lib/modules/*/extra/luma-duo2-modem/duo2_ipa_netparent.ko >/dev/null 2>&1 ||
+    die "no modem modules in $MODULES -- run duo2-build-modem.sh after duo2-stage-modules.sh"
+ls "$GPUFW"/ipa_fws.mdt >/dev/null 2>&1 || die "no IPA firmware in $GPUFW"
+cp -a --no-preserve=ownership "$MODEM/usr/." "$LAYER/usr/"
+install -m 0644 "$GPUFW"/ipa_fws.* "$LAYER/usr/lib/firmware/"
+# MPSS loads through the subsystem/PIL framework from the firmware root; the
+# images stay on the phone's modem partition, mounted at boot.
+for n in modem.mdt $(seq -f 'modem.b%02g' 0 31) modem_pr; do
+    ln -sfn "/run/luma-duo2/firmware/modem/image/$n" "$LAYER/usr/lib/firmware/$n"
+done
+for f in usr/lib/systemd/system/luma-duo2-modem-setup.service \
+         usr/lib/systemd/system/luma-duo2-modem.service \
+         usr/lib/systemd/system/pd-mapper.service \
+         usr/lib/systemd/system/rmtfs.service.d/50-luma-duo2.conf \
+         usr/lib/systemd/system/tqftpserv.service.d/50-luma-duo2.conf \
+         usr/lib/udev/rules.d/80-luma-duo2-modem.rules; do
+    install -D -m 0644 "$OVERLAY/$f" "$LAYER/$f"
+done
+install -D -m 0755 "$OVERLAY/usr/libexec/luma-duo2-modem" "$LAYER/usr/libexec/luma-duo2-modem"
+ln -sf ../luma-duo2-modem.service "$LAYER/usr/lib/systemd/system/multi-user.target.wants/luma-duo2-modem.service"
+
 U="$LAYER/usr/lib/systemd/system"
 install -d "$U/multi-user.target.wants" "$U/gdm.service.d"
 cat >"$U/luma-duo2-touch.service" <<'EOF'

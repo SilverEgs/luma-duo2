@@ -1,0 +1,97 @@
+From: luma-duo2
+Subject: pd-mapper: take firmware directories on the command line
+
+pd-mapper finds its *.jsn domain maps through /sys/class/remoteproc, which
+Qualcomm's downstream subsystem/PIL kernels (msm-5.4) leave empty. When
+directories are given as arguments, scan those for *.jsn instead.
+
+--- a/pd-mapper.c
++++ b/pd-mapper.c
+@@ -272,6 +272,53 @@
+   NULL,
+ };
+ 
++/*
++ * Kernels without the remoteproc class (Qualcomm's downstream subsystem/PIL
++ * framework, e.g. msm-5.4) expose no firmware paths to discover. Directories
++ * passed on the command line are scanned for *.jsn instead.
++ */
++static void pd_enumerate_dir(struct assoc *json_set, const char *path)
++{
++	char json_path[PATH_MAX];
++	struct dirent *fw_de;
++	DIR *fw_dir;
++	size_t len;
++	int i;
++
++	fw_dir = opendir(path);
++	if (!fw_dir) {
++		warn("cannot open %s", path);
++		return;
++	}
++
++	while ((fw_de = readdir(fw_dir)) != NULL) {
++		bool found = false;
++
++		len = strlen(fw_de->d_name);
++		for (i = 0; known_extensions[i] != NULL; i++) {
++			size_t extens_len = strlen(known_extensions[i]);
++
++			if (len > extens_len &&
++			    !strcmp(&fw_de->d_name[len - extens_len], known_extensions[i])) {
++				found = true;
++				break;
++			}
++		}
++		if (!found)
++			continue;
++
++		if (strlen(path) + 1 + len + 1 > sizeof(json_path))
++			continue;
++
++		strcpy(json_path, path);
++		strcat(json_path, "/");
++		strcat(json_path, fw_de->d_name);
++		assoc_set(json_set, json_path, NULL);
++	}
++
++	closedir(fw_dir);
++}
++
+ static int pd_enumerate_jsons(struct assoc *json_set)
+ {
+ 	char firmware_value[PATH_MAX];
+@@ -372,7 +419,7 @@
+ 	return 0;
+ }
+ 
+-static int pd_load_maps(void)
++static int pd_load_maps(int ndirs, char **dirs)
+ {
+ 	struct assoc json_set;
+ 	unsigned long it;
+@@ -381,7 +428,14 @@
+ 
+ 	assoc_init(&json_set, 20);
+ 
+-	pd_enumerate_jsons(&json_set);
++	if (ndirs > 0) {
++		int i;
++
++		for (i = 0; i < ndirs; i++)
++			pd_enumerate_dir(&json_set, dirs[i]);
++	} else {
++		pd_enumerate_jsons(&json_set);
++	}
+ 
+ 	assoc_foreach(jsn, NULL, &json_set, it) {
+ 		ret = pd_load_map(jsn);
+@@ -404,7 +458,7 @@
+ 	int ret;
+ 	int fd;
+ 
+-	ret = pd_load_maps();
++	ret = pd_load_maps(argc - 1, argv + 1);
+ 	if (ret)
+ 		exit(1);
+ 

@@ -1,0 +1,23 @@
+[Unit]
+Description=Luma Duo 2: the cellular modem (MPSS)
+Documentation=https://github.com/none24smu/luma-duo2/blob/main/docs/modem.md
+# The modem asks for its EFS (rmtfs), its carrier configuration (tqftpserv)
+# and the service locator (pd-mapper) while it boots.
+Requires=luma-duo2-modem-setup.service rmtfs.service
+Wants=pd-mapper.service tqftpserv.service ModemManager.service
+After=luma-duo2-modem-setup.service rmtfs.service pd-mapper.service tqftpserv.service
+
+[Service]
+# Microsoft's subsystem framework boots the MPSS when /dev/subsys_modem is
+# opened and shuts it down when the last opener closes it, so the unit holds
+# it open as stdin for as long as it runs (Android's pm-service does the same).
+StandardInput=file:/dev/subsys_modem
+StandardOutput=journal
+ExecStart=/usr/bin/sleep infinity
+ExecStartPost=/usr/libexec/luma-duo2-modem ready
+TimeoutStartSec=150
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

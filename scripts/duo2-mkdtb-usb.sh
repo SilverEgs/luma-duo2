@@ -60,6 +60,15 @@ python3 - "$DTS" <<'PY'
 import re, sys, pathlib
 p = pathlib.Path(sys.argv[1]); s = p.read_text()
 
+# dtc decompiles a string list it will not print as "a", "b" with bare \0
+# separators, and reads its own "\0" followed by a digit back as one octal
+# escape: the IPA's qcom,scaling-exceptions = "wdi", "100", "600", "1200"
+# came out as "wdi\0100\0600\01200" and went back in as "wdi\x08000\n00",
+# which fails IPA probe (-EFAULT) and with it all modem data (docs/modem.md).
+# A full three-digit \000 is unambiguous.
+s, n_nul = re.subn(r'(?<!\\)\\0(?=[0-7])', r'\\000', s)
+print(f"    ambiguous \\0 escapes made explicit: {n_nul}")
+
 # Narrow to the ssusb@a600000 block (usb_1, the port the cable is in and the
 # controller Microsoft's own cmdline names in androidboot.usbcontroller).
 start = s.index("ssusb@a600000 {")

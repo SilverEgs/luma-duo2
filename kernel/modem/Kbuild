@@ -1,0 +1,2 @@
+# Out-of-tree stopgaps for the modem data path on msm-5.4 (docs/modem.md).
+obj-m := duo2_ipa_dtfix.o duo2_ipa_netparent.o

@@ -1,0 +1,45 @@
+From: luma-duo2
+Subject: lib: name ourselves in NEW_SERVER/DEL_SERVER announcements
+
+qrtr_new_server() leaves pkt.server.node/port zeroed. Upstream's in-kernel
+name service ignores both for local servers, but Qualcomm's downstream qrtr
+(msm-5.4, qrtr_sendmsg) looks the announced node up and silently drops the
+packet when it names a remote node. Node 0 is the modem, so once the MPSS is
+up every server published with this library (rmtfs, pd-mapper, tqftpserv)
+vanishes without an error -- the modem then waits ~60 s and comes up with
+no TFTP or service-locator peer. Fill in our own address.
+
+--- a/lib/qrtr.c
++++ b/lib/qrtr.c
+@@ -107,6 +107,15 @@
+ 	pkt.cmd = cpu_to_le32(QRTR_TYPE_NEW_SERVER);
+ 	pkt.server.service = cpu_to_le32(service);
+ 	pkt.server.instance = cpu_to_le32(instance << 8 | version);
++	/*
++	 * Name ourselves as the server. Upstream's in-kernel name service
++	 * ignores these fields for local servers, but Qualcomm's downstream
++	 * qrtr (msm-5.4 qrtr_sendmsg) looks up pkt.server.node and silently
++	 * drops the announcement when it names a remote node -- and 0, the
++	 * memset default, is the modem's node once the modem is up.
++	 */
++	pkt.server.node = cpu_to_le32(sq.sq_node);
++	pkt.server.port = cpu_to_le32(sq.sq_port);
+ 
+ 	return qrtr_sendto(sock, sq.sq_node, QRTR_PORT_CTRL, &pkt, sizeof(pkt));
+ }
+@@ -124,6 +133,15 @@
+ 	pkt.cmd = cpu_to_le32(QRTR_TYPE_DEL_SERVER);
+ 	pkt.server.service = cpu_to_le32(service);
+ 	pkt.server.instance = cpu_to_le32(instance << 8 | version);
++	/*
++	 * Name ourselves as the server. Upstream's in-kernel name service
++	 * ignores these fields for local servers, but Qualcomm's downstream
++	 * qrtr (msm-5.4 qrtr_sendmsg) looks up pkt.server.node and silently
++	 * drops the announcement when it names a remote node -- and 0, the
++	 * memset default, is the modem's node once the modem is up.
++	 */
++	pkt.server.node = cpu_to_le32(sq.sq_node);
++	pkt.server.port = cpu_to_le32(sq.sq_port);
+ 	pkt.server.node = cpu_to_le32(sq.sq_node);
+ 	pkt.server.port = cpu_to_le32(sq.sq_port);
+ 

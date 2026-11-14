@@ -1,0 +1,14 @@
+# Luma Duo 2: the cellular modem (docs/modem.md).
+
+# Microsoft's kernel shares the modem's EFS buffer as the UIO device
+# "rmtfs" (msm_sharedmem); rmtfs looks for it as /dev/qcom_rmtfs_uio1.
+SUBSYSTEM=="uio", ATTR{name}=="rmtfs", SYMLINK+="qcom_rmtfs_uio1", \
+    TAG+="systemd", ENV{SYSTEMD_WANTS}+="rmtfs.service"
+
+# rmnet_ipa re-creates its netdev, parentless, at every modem start; give it
+# the IPA device as parent again so ModemManager takes it as the modem's net
+# port (duo2_ipa_netparent, loaded by luma-duo2-modem ready).
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="rmnet_ipa[0-9]*", \
+    DEVPATH=="/devices/virtual/*", \
+    TEST=="/sys/module/duo2_ipa_netparent/parameters/reparent", \
+    RUN+="/bin/sh -c 'echo %k > /sys/module/duo2_ipa_netparent/parameters/reparent'"
