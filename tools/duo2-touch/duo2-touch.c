@@ -105,17 +105,19 @@ static int panel_create(struct panel *p, const struct heat_cfg *c) {
     ioctl(p->fd, UI_SET_EVBIT, EV_ABS);
     ioctl(p->fd, UI_SET_KEYBIT, BTN_TOUCH);
     ioctl(p->fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT);
-    int w = c->logical_max[0], h = c->logical_max[1];
+    // The report puts the panel's short side on x and its long side on y
+    // (heat_report); the tuning's axis 0 is the long side.
+    int w = c->logical_max[1], h = c->logical_max[0];
     // Logical units per mm, as the stock report scales them.
-    int rx = (int)((float)w / c->size_mm[0] + 0.5f), ry = (int)((float)h / c->size_mm[1] + 0.5f);
+    int rx = (int)((float)w / c->size_mm[1] + 0.5f), ry = (int)((float)h / c->size_mm[0] + 0.5f);
     abs_setup(p->fd, ABS_X, 0, w, rx);
     abs_setup(p->fd, ABS_Y, 0, h, ry);
     abs_setup(p->fd, ABS_MT_SLOT, 0, HEAT_MAX_TRACKS - 1, 0);
     abs_setup(p->fd, ABS_MT_TRACKING_ID, 0, 0xffff, 0);
     abs_setup(p->fd, ABS_MT_POSITION_X, 0, w, rx);
     abs_setup(p->fd, ABS_MT_POSITION_Y, 0, h, ry);
-    abs_setup(p->fd, ABS_MT_TOUCH_MAJOR, 0, h, ry);
-    abs_setup(p->fd, ABS_MT_TOUCH_MINOR, 0, h, ry);
+    abs_setup(p->fd, ABS_MT_TOUCH_MAJOR, 0, w, rx);
+    abs_setup(p->fd, ABS_MT_TOUCH_MINOR, 0, w, rx);
     struct uinput_setup s = { 0 };
     s.id.bustype = BUS_VIRTUAL; s.id.vendor = 0x045e; s.id.product = p->product; s.id.version = 1;
     snprintf(s.name, sizeof s.name, "%s", p->name);
