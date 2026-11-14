@@ -95,6 +95,23 @@ install -D -m 0644 "$TOUCHLIB" "$L/touch/lib64/libsurfacetouch_c1.so"
 install -m 0755 "$TOOLS/duo2-kmstest" "$L/bin/duo2-kmstest"
 install -m 0644 "$SSHPUB" "$L/ssh/root_authorized_keys"
 
+# Luma packages newer than the nightly, built here with duo2-luma-builder.sh:
+# Mutter with the handheld inexact scales (luma-fixes/0019; the panels' 2.5),
+# and the Shell from Luma's current tree, whose search no longer swallows the
+# on-screen keyboard's taps. Their files go over the nightly's in the layer;
+# the rpmdb still names the nightly's versions.
+UIRPMS="mutter/aarch64/RPMS/mutter-50.4-1.luma.20.duo2.1.fc44.aarch64.rpm
+gnome-shell/RPMS/aarch64/gnome-shell-50.3-1.luma.176.fc44.aarch64.rpm"
+for rpm in $UIRPMS; do
+    [ -f "$LUMA/build/packages/$rpm" ] || die "no luma/build/packages/$rpm -- build it with duo2-luma-builder.sh"
+    info "layering $(basename "$rpm")"
+done
+for rpm in $UIRPMS; do
+    # rpm2cpio from the Fedora image (the workstation has no rpm); cpio here.
+    docker run --rm -v "$LUMA/build/packages:/pkgs:ro" "$IMAGE" rpm2cpio "/pkgs/$rpm" |
+        (cd "$LAYER" && cpio -idm --quiet --no-absolute-filenames './usr/*')
+done
+
 # Duo 2 overlay pieces that still apply under GNOME Shell.
 install -D -m 0644 "$OVERLAY/usr/lib/udev/rules.d/70-luma-duo2-gpu.rules" \
     "$LAYER/usr/lib/udev/rules.d/70-luma-duo2-gpu.rules"
@@ -234,6 +251,55 @@ Name=Luma Duo 2 touchscreen outputs
 Exec=/usr/libexec/luma-duo2-touch-outputs
 NoDisplay=true
 X-GNOME-Autostart-Phase=Initialization
+EOF
+# Both panels at Android's density for them (400 dpi: scale 2.5), side by
+# side, the left one primary. 2.5 does not divide 1344x1892 exactly; Luma's
+# Mutter offers such scales on handhelds with the logical size rounded
+# (538x757) and never picks one by itself, so this system default does. A
+# user's own monitors.xml still wins.
+install -D -m 0644 /dev/stdin "$E/xdg/monitors.xml" <<'EOF'
+<monitors version="2">
+  <configuration>
+    <layoutmode>logical</layoutmode>
+    <logicalmonitor>
+      <x>0</x>
+      <y>0</y>
+      <scale>2.5</scale>
+      <primary>yes</primary>
+      <monitor>
+        <monitorspec>
+          <connector>DSI-1</connector>
+          <vendor>QCM</vendor>
+          <product>0x0001</product>
+          <serial>0x00000001</serial>
+        </monitorspec>
+        <mode>
+          <width>1344</width>
+          <height>1892</height>
+          <rate>43.570</rate>
+        </mode>
+      </monitor>
+    </logicalmonitor>
+    <logicalmonitor>
+      <x>538</x>
+      <y>0</y>
+      <scale>2.5</scale>
+      <monitor>
+        <monitorspec>
+          <connector>DSI-2</connector>
+          <vendor>QCM</vendor>
+          <product>0x0001</product>
+          <serial>0x00000001</serial>
+        </monitorspec>
+        <mode>
+          <width>1344</width>
+          <height>1892</height>
+          <rate>43.570</rate>
+        </mode>
+      </monitor>
+    </logicalmonitor>
+  </configuration>
+</monitors>
 EOF
 # Both panels for the Shell's display geometry (schema 2: several built-in
 # displays by connector). No camera openings on either panel.

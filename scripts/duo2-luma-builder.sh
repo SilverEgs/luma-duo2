@@ -83,9 +83,15 @@ fi
 
 # Defects found in the Luma tree itself, kept as patches in luma-fixes/ and
 # applied to the checkout before building. Already-applied fixes are skipped.
+# A fix that no longer applies means Luma has since changed that code; it is
+# reported and left out, so one stale fix does not stop unrelated builds.
 for fix in "$LUMA_DUO2_ROOT"/luma-fixes/*.patch; do
     [ -f "$fix" ] || continue
     if git -C "$LUMA" apply --check -R "$fix" 2>/dev/null; then continue; fi
+    if ! git -C "$LUMA" apply --check "$fix" 2>/dev/null; then
+        warn "luma-fixes/$(basename "$fix") no longer applies to this Luma tree; left out (refresh or drop it)"
+        continue
+    fi
     git -C "$LUMA" apply "$fix" || die "luma-fixes/$(basename "$fix") does not apply"
     info "applied luma-fixes/$(basename "$fix")"
 done
