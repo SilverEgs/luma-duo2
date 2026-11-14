@@ -91,9 +91,10 @@ python3 duo2-shot.py /tmp/home.png
 
 ## Known issues
 
-- Only DSI-1 is lit: the kernel exports the two panels as tiles of one
-  display and Mutter merges them (`Tiled monitor on DSI-1 didn't have any
-  tiled modes`). Patch 0010 stops exporting the TILE property.
+- Both panels are separate monitors (kernel patch 0010): DSI-1 on the
+  left at 0,0 and DSI-2 on the right at 672,0, both at scale 2. They share
+  one EDID (vendor `QCM`, serial `0x00000001`), so Mutter cannot tell them
+  apart in `monitors.xml`.
 - Failed units on the first boot, none of them blocking: `luma-grow-root`
   (the initramfs already grew the root), `systemd-sysctl` (keys the 5.4
   kernel lacks), `luma-greenboot-fallback`, `luma-app-baseline`, `firewalld`,
