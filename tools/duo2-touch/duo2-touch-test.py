@@ -45,7 +45,14 @@ def report(panel, seq, contacts, peak=0.2, sigma=1.0):
     return bytes(r)
 
 
+# After a lift the digitizer keeps scanning for a while (at least 4 and
+# usually 10 or more empty frames) before it goes quiet; the tracker closes
+# its tracks on those, so a synthetic touch ends the same way.
+LIFT_FRAMES = 10
+
+
 def run(panel, path):
+    path = list(path) + [[]] * LIFT_FRAMES
     s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     t = time.monotonic()
     for seq, contacts in enumerate(path):

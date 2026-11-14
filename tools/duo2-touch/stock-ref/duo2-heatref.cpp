@@ -57,7 +57,21 @@ double g_now;   // the recording time of the report being processed
 void svc_noop(void *) {}
 void svc_set_angle_sensitivity(void *, float) {}
 bool svc_send_message_to_touch_fw(void *, uint32_t length, const uint8_t *data, const EosHeatDevice *) {
-    fprintf(stderr, "to touch fw: %u bytes, report 0x%02x\n", length, length ? data[0] : 0);
+    Dl_info di = {};
+    void *ra = __builtin_return_address(0);
+    dladdr(ra, &di);
+    fprintf(stderr, "to touch fw: %u bytes, report 0x%02x at %.6f from", length, length ? data[0] : 0, g_now);
+    void **fp = (void **)__builtin_frame_address(0);
+    for (int lvl = 0; lvl < 6 && fp; lvl++) {
+        ra = fp[1];
+        if (!dladdr(ra, &di)) break;
+        fprintf(stderr, " %s+0x%lx", di.dli_sname ? di.dli_sname : "?",
+                (long)((char *)ra - (char *)(di.dli_sname ? di.dli_saddr : di.dli_fbase)));
+        fp = (void **)fp[0];
+    }
+    fprintf(stderr, ":");
+    for (uint32_t i = 0; i < length; i++) fprintf(stderr, "%02x", data[i]);
+    fprintf(stderr, "\n");
     return false;
 }
 void svc_send_pen_reports(void *, const void *, uint32_t) {}
