@@ -117,6 +117,10 @@ install -D -m 0644 "$OVERLAY/usr/lib/udev/rules.d/70-luma-duo2-gpu.rules" \
     "$LAYER/usr/lib/udev/rules.d/70-luma-duo2-gpu.rules"
 install -D -m 0644 "$OVERLAY/usr/lib/udev/rules.d/90-luma-duo2-touch.rules" \
     "$LAYER/usr/lib/udev/rules.d/90-luma-duo2-touch.rules"
+# Grow the root file system only when its partition has room (it already
+# fills it), not by asking the read-only /sysroot to resize at every boot.
+install -D -m 0644 "$OVERLAY/usr/lib/systemd/system/luma-grow-root.service.d/50-luma-duo2.conf" \
+    "$LAYER/usr/lib/systemd/system/luma-grow-root.service.d/50-luma-duo2.conf"
 # Swappiness within what the 5.4 kernel accepts (Luma asks for 180).
 install -D -m 0644 "$OVERLAY/usr/lib/sysctl.d/90-luma-duo2.conf" "$LAYER/usr/lib/sysctl.d/90-luma-duo2.conf"
 # Which panel each backlight drives, for Luma's Mutter (mutter patch 0032).
