@@ -8,7 +8,11 @@
 // each panel as its own Linux multitouch screen through uinput.
 //
 // Usage: duo2-touch [--lib LIB] [--hidraw /dev/hidrawN] [--test-input] [-v]
-//        duo2-touch [--lib LIB] --replay FILE     (a duo2-heatcap recording)
+//        duo2-touch [--lib LIB] --replay FILE [--probe]  (a duo2-heatcap recording;
+//                   --probe prints each stage as stock-ref/heatprobe.cpp does)
+//
+// --align FILE: the unit's two-panel alignment record (default
+// /var/lib/luma-duo2/touch/TwoPanelAlignment.bin, copied from sfpd).
 
 #include "heat.h"
 
@@ -31,6 +35,7 @@
 #include <unistd.h>
 
 #define DEFAULT_LIB "/usr/lib/luma-duo2/touch/lib64/libsurfacetouch_c1.so"
+#define DEFAULT_ALIGN "/var/lib/luma-duo2/touch/TwoPanelAlignment.bin"
 #define SPI_READY "/sys/bus/spi/devices/spi0.0/ready"
 #define REPORT_LEFT 0x3c
 #define REPORT_RIGHT 0x0a
@@ -67,14 +72,15 @@ struct panel {
     uint16_t product;
     int fd;
     struct heat_tracker tracker;
+    struct heat_detector detector;
     int slot_id[HEAT_MAX_TRACKS];     // tracking id per slot, -1 free
     long long last_frame;
     int touching;
 };
 
 static struct panel g_panels[2] = {
-    { "Surface Duo 2 Touchscreen Left", 0x0c1d, -1, { { { 0 } }, 0 }, { 0 }, 0, 0 },
-    { "Surface Duo 2 Touchscreen Right", 0x0c1e, -1, { { { 0 } }, 0 }, { 0 }, 0, 0 },
+    { .name = "Surface Duo 2 Touchscreen Left", .product = 0x0c1d, .fd = -1 },
+    { .name = "Surface Duo 2 Touchscreen Right", .product = 0x0c1e, .fd = -1 },
 };
 
 static void emit(struct panel *p, int type, int code, int value) {
@@ -221,13 +227,32 @@ static struct panel *panel_for(uint8_t id) {
     return id == REPORT_LEFT ? &g_panels[0] : id == REPORT_RIGHT ? &g_panels[1] : NULL;
 }
 
+static FILE *g_probe;    // --probe: per-stage output in stock-ref/heatprobe.cpp's format
+
 static int process(const struct heat_cfg *c, struct panel *p, const uint8_t *r, size_t n,
                    struct heat_contact *k, int maxk) {
-    struct heat_frame f;
+    static struct heat_frame f;
     if (heat_parse_report(c, r, n, &f) < 0) return -1;
-    struct heat_blob b[HEAT_MAX_BLOBS];
-    int nb = heat_detect(c, &f, b, HEAT_MAX_BLOBS);
-    return heat_track(c, &p->tracker, b, nb, k, maxk);
+    struct heat_detector *d = &p->detector;
+    int nd = heat_detect(c, d, &f);
+    if (g_probe) {
+        fprintf(g_probe, "P frame panel=%s\n", p == &g_panels[0] ? "left" : "right");
+        heat_dump_blobs(g_probe, d, &f);
+    }
+    struct heat_finger fg[HEAT_MAX_BLOBS];
+    int nf = 0;
+    for (int i = 0; nd > 0 && i < HEAT_MAX_BLOBS; i++) {
+        const struct heat_blob *b = &d->blob[i];
+        if (b->status != 1 || !b->label) continue;
+        if (heat_to_mm(c, b->x, b->y, b->radius, &fg[nf])) nf++;
+    }
+    if (g_probe) {
+        fprintf(g_probe, "P fingers n=%d\n", nf);
+        for (int i = 0; i < nf; i++)
+            fprintf(g_probe, "P finger %d x=%.6f y=%.6f ax=%.6f ay=%.6f r=%.6f\n", i, (double)fg[i].x,
+                    (double)fg[i].y, (double)fg[i].ax, (double)fg[i].ay, (double)fg[i].radius);
+    }
+    return heat_track(c, &p->tracker, fg, nf, k, maxk);
 }
 
 // Replay a duo2-heatcap recording: records of [u64 CLOCK_MONOTONIC ns][u32 len][bytes].
@@ -259,20 +284,24 @@ static int replay(const struct heat_cfg *c, const char *file) {
 }
 
 int main(int argc, char **argv) {
-    const char *lib = DEFAULT_LIB, *hidraw = NULL, *replay_file = NULL;
+    const char *lib = DEFAULT_LIB, *align = DEFAULT_ALIGN, *hidraw = NULL, *replay_file = NULL;
     int test_input = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--lib") && i + 1 < argc) lib = argv[++i];
         else if (!strcmp(argv[i], "--hidraw") && i + 1 < argc) hidraw = argv[++i];
         else if (!strcmp(argv[i], "--replay") && i + 1 < argc) replay_file = argv[++i];
+        else if (!strcmp(argv[i], "--align") && i + 1 < argc) align = argv[++i];
+        else if (!strcmp(argv[i], "--probe")) g_probe = stdout;
         else if (!strcmp(argv[i], "--test-input")) test_input = 1;
         else if (!strcmp(argv[i], "-v")) g_verbose = 1;
-        else { log_msg("usage: %s [--lib LIB] [--hidraw DEV] [--replay FILE] [--test-input] [-v]", argv[0]); return 2; }
+        else { log_msg("usage: %s [--lib LIB] [--align FILE] [--hidraw DEV] [--replay FILE [--probe]] [--test-input] [-v]", argv[0]); return 2; }
     }
     setvbuf(stderr, NULL, _IOLBF, 0);
     struct heat_cfg cfg;
     char err[256];
     if (heat_cfg_load(&cfg, lib, err, sizeof err) < 0) { log_msg("tuning: %s", err); return 1; }
+    if (heat_cfg_load_alignment(&cfg, align, err, sizeof err) < 0) log_msg("panel alignment: %s; none applied", err);
+    else log_msg("panel alignment: %.3f mm", (double)cfg.align_mm);
     log_msg("tuning from %s: %d x %d antennas, %.2f x %.2f mm (pitch %.4f mm), threshold %.3f..%.3f%s",
          lib, cfg.cols, cfg.rows, cfg.size_mm[0], cfg.size_mm[1], cfg.pitch_mm[0], cfg.thr_min, cfg.thr_max,
          cfg.stretch_on ? ", edge stretching" : "");

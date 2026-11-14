@@ -15,7 +15,9 @@ set -euo pipefail
 SRC="$LUMA_DUO2_ROOT/tools/duo2-touch"
 OUT="$LUMA_DUO2_ROOT/../build/tools"
 NAME="${LUMA_DUO2_BUILDER_NAME:-luma-duo2-builder}"
-CC_FLAGS=(-O2 -Wall -Wextra -std=c11 -D_GNU_SOURCE)
+# No fused multiply-adds: the stock library's arithmetic is reproduced
+# operation for operation (tools/duo2-touch/heat.c).
+CC_FLAGS=(-O2 -Wall -Wextra -std=c11 -D_GNU_SOURCE -ffp-contract=off)
 SOURCES=(duo2-touch.c heat.c)
 
 install -d "$OUT"

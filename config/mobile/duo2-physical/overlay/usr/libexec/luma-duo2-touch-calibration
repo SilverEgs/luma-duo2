@@ -1,12 +1,12 @@
 #!/bin/sh
-# Surface Duo 2: give Microsoft's touch library this unit's factory panel
-# alignment, as Android's init.surface.touch.preloads.sh does on every boot:
-# /vendor/sfpd/display/PixelAlignmentData.bin -> TwoPanelAlignment.bin in the
-# library's storage directory. sfpd is the phone's own factory-data
+# Surface Duo 2: give duo2-touch this unit's factory panel alignment, as
+# Android's init.surface.touch.preloads.sh gives it to the stock touch library
+# on every boot: /vendor/sfpd/display/PixelAlignmentData.bin ->
+# TwoPanelAlignment.bin in the touch storage directory. sfpd is the phone's own factory-data
 # partition (FAT), mounted read-only just long enough to copy one file.
 set -eu
 
-state=${1:-/var/lib/duo2-touchd}
+state=${1:-/var/lib/luma-duo2/touch}
 part=/dev/disk/by-partlabel/sfpd
 [ -e "$part" ] || { echo "no sfpd partition; touch runs without panel alignment" >&2; exit 0; }
 

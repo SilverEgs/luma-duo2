@@ -35,8 +35,9 @@ touches a panel and stop when nothing does. A frame
 | 10- | sections: `u32 size, u16 type`, then the body |
 
 Section `0x0100` is the heat image: byte 6 nonzero for 8-bit samples, a `u32`
-start and `u32` count at 8 and 12, then 630 bytes, x-major: 21 antennas across
-the panel's short side by 30 along its long side. `0xB4` (180) is no signal;
+start and `u32` count at 8 and 12, then 630 bytes: 21 rows (the panel's short
+side) of 30 antennas (its long side). The stock code calls the long axis x and
+the short one y, and so does `heat.c`; only the OS report swaps them. `0xB4` (180) is no signal;
 smaller is stronger. Section `0xFF00` holds sub-sections (`u8 type, u8 flags,
 u16 size`): the cycle header (0), topology (3: 21 x 30), frequency noise (4),
 gain clipping (6), scan time (`0x32`). There is no blob section: the digitizer
@@ -55,7 +56,11 @@ A 41088-byte `PSDB` blob (project `0x0C1D`) in `libsurfacetouch_c1.so`.
 |---|---|---|
 | `0x3c` | panel region record: antennas, active span, panel size, report range | 21 x 30; 81.15 x 117.67 mm; 85.18 x 120.20 mm; 0..8517 x 0..12019 |
 | `0xef4` | `TouchDetectionCfg`: threshold clamp, strong-junction level, peak floor, noise table | 0.04..0.104, 0.04, 0.055, 20 entries |
-| `0xef4 + 0xeac + 4` | blob radius factor | 0.85 |
+| `0xef4 + 0xb4..0x100` | blob size limits, short and long saddle factors, topography levels, halo fractions | 300, 1.9 / 1.11 / 1.2, 1.27, 0.5 / 0.75 / 0.875 |
+| `0xef4 + 0xe80` | palm-sized blob | 50 junctions |
+| `0xc94 + 4` | "near the border" margin | 0.21 antennas |
+| `0x1da0 + 4` | blob radius factor | 0.85 |
+| `0x104`, `0x10b` | two-panel alignment clamp and switch | 0.14 mm, on |
 | `0x870 + 0x22c` | `StretchingConfig`: edge zones and knees per axis | x: -0.11 / 0.6, y: 0.11 / 0.98 |
 
 The antenna pitch is the active span over the antenna count less one (4.0576
@@ -72,17 +77,33 @@ Each step names the stock function it reproduces.
    range. Here that is 0.04, a byte of 162 or less.
 3. **Blobs** (`RunCcl`, `RunCclForSpecificJunction`, `CreateNewBlob`,
    `MergeSameBlobsData`): one raster pass with 8-connectivity, joining only
-   through strong junctions, then label equivalences merged. A blob of two
-   junctions or fewer needs a peak above 0.055.
-4. **Features** (`FeatureExtraction`, `SetBlobOnBorderFlags`,
-   `SetBlobRadius`): the position is the centroid weighted by each junction's
-   magnitude above the threshold; the radius is the blob's widest line (sum
-   over maximum) times half the pitch times 0.85, across the axis away from
-   any border it touches. Blobs whose peak is under 0.04, or of 50 junctions
-   or more (a palm), are dropped.
+   through strong junctions, then label equivalences merged (with the stock
+   merge order, which decides each merged record's sums and index). A blob of
+   two junctions or fewer needs a peak above 0.055; one of 300 or more ends
+   the frame.
+4. **Features** (`FeatureExtraction`): the position is the centroid weighted
+   by each junction's magnitude above the threshold; border, near-border,
+   corner and hinge flags (`SetBlobOnBorderFlags`); the radius, the blob's
+   widest line (sum over maximum) times half the pitch times 0.85, across the
+   axis away from any border it touches (`SetBlobRadius`); the peaks
+   (`DetectPeak`), with neighbouring peaks joined across short and long
+   saddles (`MergePeaksWithShortSaddle`, `...LongSaddle`); orientation, axis
+   ratio and spread from the second moments (`CalculateShapeFeatures`, with
+   bionic's `atanf`); the sub-blobs at three levels between floor and peak
+   (`CalculateTopography`, a second CCL pass); and the halo
+   (`CalculateHaloFeatures`). Blobs whose peak is under 0.04 are dropped, and
+   blobs of 50 junctions or more marked as palms.
+
+   All of this is single-precision arithmetic in the stock order, built
+   without fused multiply-adds: over a recorded session (3220 frames) every record and
+   feature is bit-identical to the stock library's (see Debugging).
 5. **Millimetres** (`DetectedArray::ConvertPositionFromAntennaToMmAndFlip`,
-   `FixOffsetRotation`): antenna position times the pitch plus the centring
-   offset.
+   `FixOffsetRotation`): antenna position times the pitch, less the centring
+   offset and the unit's two-panel alignment. The alignment is the float at
+   byte 16 of the unit's `PixelAlignmentData.bin`, in micrometres, kept only
+   between -0.14 and 0.28 mm and clamped to 0.14 mm
+   (`PanelAlignmentReaderPersistentStorageFullUefiStructure`,
+   `SetCurrentPanelAlignmentOffset`). Without the file it is 0.
 6. **Edge stretching** (`ReportInformation::RunStretching`): within `r +
    zone` of an edge, `[r * 0.4247 - 0.0316 + knee, r + zone]` is spread over
    `[0, r + zone]`, so a finger whose centre cannot reach the antennas' edge
@@ -114,7 +135,11 @@ as "automatic".
 
 `scripts/duo2-build-touch.sh` builds the daemon for the phone;
 `duo2-compose-ostree.sh` installs it with the stock library (as data only, for
-its tuning) and the `luma-duo2-touch` unit.
+its tuning) and the `luma-duo2-touch` unit. Before each start,
+`luma-duo2-touch-calibration` copies the unit's alignment from its `sfpd`
+partition (read-only) to `/var/lib/luma-duo2/touch/TwoPanelAlignment.bin`, as
+Android's `init.surface.touch.preloads.sh` does; the file is the unit's own
+and never part of the image.
 
 ## Debugging
 
@@ -125,6 +150,14 @@ its tuning) and the `luma-duo2-touch` unit.
   heat reports in the digitizer's own format; `duo2-touch-test.py tap left 0.5
   0.5` or `... swipe right 0.5 0.99 0.5 0.5` sends a synthetic finger through
   the whole path to the compositor, for testing without touching the phone.
+- `duo2-touch --replay FILE --probe` prints every stage (blob records,
+  features, fingers) in the format of `stock-ref/heatprobe.cpp`, a library
+  preloaded under `stock-ref/duo2-heatref.cpp` that prints the same stages
+  from inside the stock library as it runs the same recording (wrapping the
+  functions it calls through its own PLT). Comparing the two line by line,
+  frame by frame, is how each step is checked. The stock side needs the
+  user's own vendor image and runs on the phone with the stock `linker64`
+  and runtime (`scripts/duo2-touch-bundle.sh`).
 
 ## The earlier approach
 

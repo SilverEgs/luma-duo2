@@ -100,6 +100,10 @@ install -D -m 0644 "$OVERLAY/usr/lib/udev/rules.d/70-luma-duo2-gpu.rules" \
     "$LAYER/usr/lib/udev/rules.d/70-luma-duo2-gpu.rules"
 install -D -m 0644 "$OVERLAY/usr/lib/udev/rules.d/90-luma-duo2-touch.rules" \
     "$LAYER/usr/lib/udev/rules.d/90-luma-duo2-touch.rules"
+# The unit's own two-panel alignment, copied from its sfpd partition at each
+# start (the file is per unit and never part of the image).
+install -D -m 0755 "$OVERLAY/usr/libexec/luma-duo2-touch-calibration" \
+    "$LAYER/usr/libexec/luma-duo2-touch-calibration"
 
 U="$LAYER/usr/lib/systemd/system"
 install -d "$U/multi-user.target.wants" "$U/gdm.service.d"
@@ -113,7 +117,10 @@ Before=gdm.service display-manager.service
 [Service]
 # Keep the digitizer powered, as the stock service does on start.
 ExecStartPre=-/bin/sh -c 'echo on > /sys/bus/spi/devices/spi0.0/power/control'
-ExecStart=/usr/lib/luma-duo2/bin/duo2-touch
+# The unit's factory panel alignment, from sfpd (docs/touch.md).
+ExecStartPre=-/usr/libexec/luma-duo2-touch-calibration /var/lib/luma-duo2/touch
+ExecStart=/usr/lib/luma-duo2/bin/duo2-touch --align /var/lib/luma-duo2/touch/TwoPanelAlignment.bin
+StateDirectory=luma-duo2/touch
 Restart=always
 RestartSec=2
 
