@@ -1,0 +1,292 @@
+#!/usr/bin/env bash
+# Luma's published ARM nightly, made to boot on the Surface Duo 2.
+#
+# Luma Mobile is no longer a separate phone rootfs: every ARM phone runs the
+# one generic ARM nightly (an OSTree commit, GNOME Shell with the Mobile
+# presentation, GDM), written to userdata as a GPT holding LumaBoot (the
+# device kit) and LumaRoot (ext4: /ostree, /boot), and adds its own hardware
+# on top. The Fairphone 6 does that with a signed device kit that
+# luma-device-layer layers with rpm-ostree on the first boot; a kit has to be
+# signed with Luma's release key, so the Duo 2 cannot use that path.
+#
+# Instead this script derives a new commit on the workstation: the nightly's
+# commit plus a Duo 2 layer (Microsoft's 5.4 kernel modules, the Adreno 660
+# firmware, duo2-touchd and its stock runtime, Turnip for KGSL, the bring-up
+# services, and the handheld profile the FP6's luma-fp6-platform carries),
+# labelled with the base commit's own SELinux policy. It deploys that commit
+# as the default beside the nightly's own deployment and writes the whole
+# disk back out as an Android sparse image for userdata.
+#
+# Usage: duo2-compose-ostree.sh NIGHTLY.sparse
+# Output: build/duo2-ostree/userdata.sparse
+#
+# Nothing from the phone, the stock firmware or this workstation enters git.
+
+set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/duo2-env.sh"
+
+SPARSE="$(realpath -e "${1:?usage: duo2-compose-ostree.sh NIGHTLY.sparse}")"
+BUILD="$LUMA_DUO2_ROOT/../build"
+OUT="${LUMA_DUO2_OSTREE_OUT:-$BUILD/duo2-ostree}"
+LUMA="${LUMA_SOURCE:-$LUMA_DUO2_ROOT/../luma}"
+IMAGE="registry.fedoraproject.org/fedora:44"
+OVERLAY="$LUMA_DUO2_ROOT/config/mobile/duo2-physical/overlay"
+
+MODULES="$BUILD/duo2-modules"
+TOUCH="$BUILD/duo2-touch"
+TURNIP="$BUILD/mesa-kgsl/opt/mesa-kgsl"
+GPUFW="$BUILD/stock-vendor/firmware"
+TOOLS="$BUILD/tools"
+SSHPUB="$BUILD/ssh/duo2_ed25519.pub"
+
+[ -d "$MODULES/lib/modules" ] || die "no staged modules -- run duo2-stage-modules.sh"
+[ -x "$TOUCH/duo2-touchd" ] || die "no $TOUCH/duo2-touchd -- run duo2-touch-bundle.sh"
+[ -d "$TURNIP" ] || die "no Turnip-KGSL in $TURNIP -- run duo2-build-turnip.sh"
+ls "$GPUFW"/a660_sqe.fw >/dev/null 2>&1 || die "no Adreno 660 firmware in $GPUFW"
+[ -x "$TOOLS/duo2-kmstest" ] || die "no $TOOLS/duo2-kmstest"
+[ -f "$SSHPUB" ] || die "no $SSHPUB"
+for f in config/mobile/luma-shell-handheld.dconf config/mobile/luma-greeter-handheld.dconf \
+         config/mobile/environment.d/90-luma-handheld.conf; do
+    [ -f "$LUMA/$f" ] || die "no $LUMA/$f -- is $LUMA a current Luma checkout?"
+done
+
+# The luma account's passcode, from the gitignored .duo2.local; only its hash
+# enters the image.
+duo2_load_config
+passcode="$(sed -n 's/^DUO2_LUMA_PASSCODE=//p' "$DUO2_LOCAL_CONFIG" 2>/dev/null | tail -1)"
+[ -n "$passcode" ] || die "no DUO2_LUMA_PASSCODE= in $DUO2_LOCAL_CONFIG"
+LUMA_PASSWORD_HASH="$(printf '%s' "$passcode" | openssl passwd -6 -stdin)"
+unset passcode
+export LUMA_PASSWORD_HASH
+
+mkdir -p "$OUT"
+RAW="$OUT/disk.raw"
+info "expanding $(basename "$SPARSE")"
+rm -f "$RAW"
+simg2img "$SPARSE" "$RAW"
+
+# The layer is assembled on the workstation, then committed inside a
+# privileged Fedora container that owns the loop device.
+LAYER="$OUT/layer"
+rm -rf "$LAYER"
+install -d "$LAYER"
+
+L="$LAYER/usr/lib/luma-duo2"
+install -d "$L/bin" "$L/ssh"
+# Microsoft's kernel modules.
+install -d "$LAYER/usr/lib/modules"
+cp -a --no-preserve=ownership "$MODULES/lib/modules/." "$LAYER/usr/lib/modules/"
+# Adreno 660 microcode, GMU firmware and zap shader, loaded by KGSL from the
+# firmware root (docs/gpu.md).
+install -d "$LAYER/usr/lib/firmware"
+install -m 0644 "$GPUFW"/a660_sqe.fw "$GPUFW"/a660_gmu.bin "$GPUFW"/a660_zap.* "$LAYER/usr/lib/firmware/"
+# Turnip for KGSL. /opt is not part of an OSTree commit (it is /var/opt), so
+# it moves under /usr/lib/luma-duo2, and its ICD manifest with it.
+cp -a --no-preserve=ownership "$TURNIP" "$L/mesa-kgsl"
+for icd in "$L"/mesa-kgsl/share/vulkan/icd.d/*.json; do
+    sed -i 's#/opt/mesa-kgsl/#/usr/lib/luma-duo2/mesa-kgsl/#g' "$icd"
+done
+# duo2-touchd and the stock runtime it hosts (docs/touch.md).
+cp -a --no-preserve=ownership "$TOUCH" "$L/touch"
+install -m 0755 "$TOOLS/duo2-kmstest" "$L/bin/duo2-kmstest"
+install -m 0644 "$SSHPUB" "$L/ssh/root_authorized_keys"
+
+# Duo 2 overlay pieces that still apply under GNOME Shell.
+install -D -m 0644 "$OVERLAY/usr/lib/udev/rules.d/70-luma-duo2-gpu.rules" \
+    "$LAYER/usr/lib/udev/rules.d/70-luma-duo2-gpu.rules"
+install -D -m 0644 "$OVERLAY/usr/lib/udev/rules.d/90-luma-duo2-touch.rules" \
+    "$LAYER/usr/lib/udev/rules.d/90-luma-duo2-touch.rules"
+install -D -m 0755 "$OVERLAY/usr/libexec/luma-duo2-touch-calibration" \
+    "$LAYER/usr/libexec/luma-duo2-touch-calibration"
+
+U="$LAYER/usr/lib/systemd/system"
+install -d "$U/multi-user.target.wants" "$U/gdm.service.d"
+cat >"$U/luma-duo2-touchd.service" <<'EOF'
+[Unit]
+Description=Luma Duo 2: touch through Microsoft's heat processor (duo2-touchd)
+Documentation=https://github.com/none24smu/luma-duo2/blob/main/docs/touch.md
+# The touchscreens exist before the display manager starts.
+Before=gdm.service display-manager.service
+ConditionPathExists=/usr/lib/luma-duo2/touch/duo2-touchd
+
+[Service]
+# duo2-touchd and the library it hosts are Android programs: run them with the
+# stock linker and runtime libraries assembled by duo2-touch-bundle.sh.
+Environment=LD_LIBRARY_PATH=/usr/lib/luma-duo2/touch/lib64
+# Keep the digitizer powered, as the stock service does on start.
+ExecStartPre=-/bin/sh -c 'echo on > /sys/bus/spi/devices/spi0.0/power/control'
+# The unit's factory two-panel alignment, from its own sfpd partition.
+ExecStartPre=-/usr/libexec/luma-duo2-touch-calibration /var/lib/duo2-touchd
+ExecStart=/usr/lib/luma-duo2/touch/linker64 /usr/lib/luma-duo2/touch/duo2-touchd --lib /usr/lib/luma-duo2/touch/lib64/libsurfacetouch_c1.so --state /var/lib/duo2-touchd
+StateDirectory=duo2-touchd
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+# Release the display pipe the ABL splash keeps reserved before the first
+# compositor starts: until a mode set frees it, SDE refuses a commit that
+# lands on that pipe (the counterpart of the FP6's Plymouth DRM release).
+cat >"$U/gdm.service.d/20-luma-duo2-display.conf" <<'EOF'
+[Service]
+ExecStartPre=-/usr/bin/timeout 10 /usr/lib/luma-duo2/bin/duo2-kmstest 1
+EOF
+# The marker duo2-home waits for: without it the phone goes back to fastboot
+# by itself (duo2.booted= seconds into boot).
+cat >"$U/luma-duo2-booted.service" <<'EOF'
+[Unit]
+Description=Luma Duo 2 bring-up: mark the boot as reaching multi-user
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/touch /run/luma-duo2-booted
+
+[Install]
+WantedBy=multi-user.target
+EOF
+# DHCP for the USB network link (the ECM half of g_cdc): the phone is
+# 172.16.42.1 and hands the workstation 172.16.42.2, with no router or DNS on
+# offer so the workstation never routes its own traffic this way.
+cat >"$U/luma-duo2-usb-dhcp.service" <<'EOF'
+[Unit]
+Description=Luma Duo 2 bring-up: DHCP for the USB network link
+After=NetworkManager.service sys-subsystem-net-devices-usb0.device
+BindsTo=sys-subsystem-net-devices-usb0.device
+
+[Service]
+ExecStartPre=/bin/sh -c "until ip -4 addr show usb0 | grep -q 172.16.42.1; do sleep 1; done"
+ExecStart=/usr/bin/dnsmasq --keep-in-foreground --port=0 --interface=usb0 --bind-interfaces --dhcp-range=172.16.42.2,172.16.42.2,255.255.255.0,1h --dhcp-option=3 --dhcp-option=6 --dhcp-authoritative --log-dhcp --dhcp-leasefile=/run/luma-duo2-usb.leases
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+for unit in luma-duo2-touchd luma-duo2-booted luma-duo2-usb-dhcp sshd; do
+    ln -sf "../$unit.service" "$U/multi-user.target.wants/$unit.service"
+done
+# Bring-up root shell on the USB serial console.
+install -d "$U/serial-getty@ttyGS0.service.d" "$U/getty.target.wants"
+cat >"$U/serial-getty@ttyGS0.service.d/10-duo2-bringup.conf" <<'EOF'
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin root --keep-baud 115200 %I $TERM
+EOF
+ln -sf ../serial-getty@.service "$U/getty.target.wants/serial-getty@ttyGS0.service"
+
+# "bootloader" sends the phone to fastboot from the booted system, the same
+# command the bring-up init and the initramfs answer to.
+install -d "$LAYER/usr/bin"
+printf '%s\n' '#!/bin/sh' '# Luma Duo 2 bring-up: reboot into fastboot.' \
+    'exec systemctl reboot --reboot-argument=bootloader' >"$LAYER/usr/bin/bootloader"
+chmod 0755 "$LAYER/usr/bin/bootloader"
+
+# USB network, read-only from /usr.
+install -d -m 0755 "$LAYER/usr/lib/NetworkManager/system-connections"
+printf '%s\n' '[connection]' 'id=duo2-usb' 'type=ethernet' 'interface-name=usb0' \
+    'autoconnect=true' '' '[ipv4]' 'method=manual' 'address1=172.16.42.1/24' '' \
+    '[ipv6]' 'method=disabled' \
+    >"$LAYER/usr/lib/NetworkManager/system-connections/duo2-usb.nmconnection"
+chmod 0600 "$LAYER/usr/lib/NetworkManager/system-connections/duo2-usb.nmconnection"
+
+# /etc defaults (OSTree's /usr/etc; merged into /etc on deploy).
+E="$LAYER/usr/etc"
+install -d "$E/ssh/sshd_config.d" "$E/systemd/system" "$E/dconf/db/luma.d" "$E/dconf/db/gdm.d"
+# SSH over the USB link: root by the bring-up key only. Read before Fedora's
+# 50-redhat.conf, so these values win.
+printf '%s\n' '# Luma Duo 2 bring-up: root by key over the USB link.' \
+    'PermitRootLogin prohibit-password' 'PasswordAuthentication no' \
+    'Match User root' '    AuthorizedKeysFile /usr/lib/luma-duo2/ssh/root_authorized_keys' \
+    >"$E/ssh/sshd_config.d/01-luma-duo2.conf"
+# The Microsoft kernel registers an hvc0 console with nothing behind it.
+ln -sf /dev/null "$E/systemd/system/serial-getty@hvc0.service"
+# No device kit: the Duo 2's layer is in the commit itself.
+ln -sf /dev/null "$E/systemd/system/luma-device-layer.service"
+# The handheld profile, as luma-fp6-platform carries it for the FP6: the
+# device class that selects GNOME Shell's Mobile presentation, its session
+# environment, and the handheld dconf defaults for the session and GDM.
+echo handheld >"$E/luma-device-class"
+install -D -m 0644 "$LUMA/config/mobile/environment.d/90-luma-handheld.conf" \
+    "$LAYER/usr/lib/environment.d/90-luma-handheld.conf"
+install -m 0644 "$LUMA/config/mobile/luma-shell-handheld.dconf" "$E/dconf/db/luma.d/10-luma-handheld"
+install -m 0644 "$LUMA/config/mobile/luma-greeter-handheld.dconf" "$E/dconf/db/gdm.d/10-luma-handheld"
+# Both panels for the Shell's display geometry (schema 2: several built-in
+# displays by connector). No camera openings on either panel.
+install -d "$LAYER/usr/share/luma"
+printf '%s\n' '{"schema": 2, "displays": [' \
+    '  {"connector": "DSI-1", "nativeWidth": 1344, "nativeHeight": 1892, "cutouts": []},' \
+    '  {"connector": "DSI-2", "nativeWidth": 1344, "nativeHeight": 1892, "cutouts": []}' \
+    ']}' >"$LAYER/usr/share/luma/display-geometry.json"
+
+# OSTree on Microsoft's 5.4 kernel: no composefs (it needs data-only overlayfs
+# lower layers, Linux 6.5). The initramfs carries the same file
+# (duo2-mkinitramfs-ostree.sh); this copy keeps the deployment consistent.
+install -D -m 0644 /dev/stdin "$LAYER/usr/lib/ostree/prepare-root.conf" <<'EOF'
+# Luma Duo 2: Microsoft's 5.4 kernel cannot mount composefs (data-only
+# overlayfs lower layers arrived in Linux 6.5).
+[composefs]
+enabled = no
+[sysroot]
+readonly = true
+EOF
+
+export VERSION_SUFFIX="duo2.$(date -u +%Y%m%d%H%M)"
+info "committing the Duo 2 layer onto the nightly ($VERSION_SUFFIX)"
+docker run --rm --privileged -v /dev:/dev -e LUMA_PASSWORD_HASH -e VERSION_SUFFIX \
+    -v "$OUT:/out" "$IMAGE" bash -euo pipefail -c '
+dnf -q install -y ostree e2fsprogs util-linux dconf android-tools >/dev/null 2>&1
+L=$(losetup -f --show -b 4096 -P /out/disk.raw)
+cleanup() { umount /mnt 2>/dev/null || true; losetup -d "$L" 2>/dev/null || true; }
+trap cleanup EXIT
+mount "${L}p2" /mnt
+repo=/mnt/ostree/repo
+base=$(ostree --repo=$repo rev-parse "$(ostree --repo=$repo refs | grep -m1 -E "luma/1/aarch64/nightly$")")
+version=$(ostree --repo=$repo show --print-metadata-key=version "$base" | tr -d "\047")
+echo "base $base ($version)"
+basedeploy=/mnt/ostree/deploy/luma/deploy/$base.0
+
+# The handheld dconf databases, compiled from the base keyfiles plus ours.
+for db in luma gdm; do
+    d=$(mktemp -d)
+    cp -a "$basedeploy/usr/etc/dconf/db/$db.d/." "$d/" 2>/dev/null || true
+    cp -a "/out/layer/usr/etc/dconf/db/$db.d/." "$d/"
+    dconf compile "/out/layer/usr/etc/dconf/db/$db" "$d"
+    rm -rf "$d"
+done
+
+new=$(ostree --repo=$repo commit --branch=luma-duo2/aarch64/nightly \
+    --tree=ref="$base" --tree=dir=/out/layer --owner-uid=0 --owner-gid=0 \
+    --selinux-policy-from-base --add-metadata-string=version="$version+$VERSION_SUFFIX" \
+    --subject="Luma $version for the Surface Duo 2")
+echo "commit $new"
+
+# Deploy as the default, keeping the nightly deployment as the fallback.
+ostree admin deploy --sysroot=/mnt --os=luma --retain "$new"
+newdeploy=/mnt/ostree/deploy/luma/deploy/$new.0
+echo "deployed $newdeploy"
+rel=${newdeploy#/mnt/ostree/}
+ln -sfn "$rel" /mnt/ostree/root.a
+ln -sfn "$rel" /mnt/ostree/root.b
+
+# Per-install /etc changes in the new deployment.
+rm -f "$newdeploy/etc/luma/device-kit.conf"
+sed -i "s/^SELINUX=.*/SELINUX=permissive/" "$newdeploy/etc/selinux/config"
+usermod --root "$newdeploy" --password "$LUMA_PASSWORD_HASH" luma
+# Bring-up: sign straight in to the Mobile shell, as the earlier greetd image
+# did. The Shell still locks on idle with the same passcode.
+sed -i "s/^\[daemon\]$/[daemon]\nAutomaticLoginEnable=True\nAutomaticLogin=luma/" "$newdeploy/etc/gdm/custom.conf"
+# A first boot has no network or RTC: start the clock from now.
+install -d /mnt/ostree/deploy/luma/var/lib/systemd/timesync
+touch /mnt/ostree/deploy/luma/var/lib/systemd/timesync/clock
+
+echo "$new" > /out/commit; echo "$version+$VERSION_SUFFIX" > /out/version
+sync
+'
+
+info "writing userdata.sparse"
+rm -f "$OUT/userdata.sparse"
+img2simg "$RAW" "$OUT/userdata.sparse"
+rm -f "$RAW"
+info "built $(cat "$OUT/version"): $OUT/userdata.sparse ($(stat -c%s "$OUT/userdata.sparse") bytes)"
