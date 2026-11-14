@@ -100,7 +100,7 @@ install -m 0644 "$SSHPUB" "$L/ssh/root_authorized_keys"
 # and the Shell from Luma's current tree, whose search no longer swallows the
 # on-screen keyboard's taps. Their files go over the nightly's in the layer;
 # the rpmdb still names the nightly's versions.
-UIRPMS="mutter/aarch64/RPMS/mutter-50.4-1.luma.20.duo2.1.fc44.aarch64.rpm
+UIRPMS="mutter/aarch64/RPMS/mutter-50.4-1.luma.20.duo2.2.fc44.aarch64.rpm
 gnome-shell/RPMS/aarch64/gnome-shell-50.3-1.luma.176.fc44.aarch64.rpm"
 for rpm in $UIRPMS; do
     [ -f "$LUMA/build/packages/$rpm" ] || die "no luma/build/packages/$rpm -- build it with duo2-luma-builder.sh"
@@ -255,8 +255,10 @@ EOF
 # Both panels at Android's density for them (400 dpi: scale 2.5), side by
 # side, the left one primary. 2.5 does not divide 1344x1892 exactly; Luma's
 # Mutter offers such scales on handhelds with the logical size rounded
-# (538x757) and never picks one by itself, so this system default does. A
-# user's own monitors.xml still wins.
+# (538x757) and never picks one by itself, so this system default does. The
+# panels run their 60 Hz mode (stock's default; Luma's Mutter takes the
+# rate from the mode's vrefresh, as the SDE link clock works out at 43.57).
+# A user's own monitors.xml still wins.
 install -D -m 0644 /dev/stdin "$E/xdg/monitors.xml" <<'EOF'
 <monitors version="2">
   <configuration>
@@ -276,7 +278,7 @@ install -D -m 0644 /dev/stdin "$E/xdg/monitors.xml" <<'EOF'
         <mode>
           <width>1344</width>
           <height>1892</height>
-          <rate>43.570</rate>
+          <rate>60.000</rate>
         </mode>
       </monitor>
     </logicalmonitor>
@@ -294,7 +296,7 @@ install -D -m 0644 /dev/stdin "$E/xdg/monitors.xml" <<'EOF'
         <mode>
           <width>1344</width>
           <height>1892</height>
-          <rate>43.570</rate>
+          <rate>60.000</rate>
         </mode>
       </monitor>
     </logicalmonitor>

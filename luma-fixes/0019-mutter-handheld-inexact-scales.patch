@@ -1,5 +1,5 @@
 From: luma-duo2 bring-up
-Subject: [PATCH] mutter: offer inexact scales on a handheld panel
+Subject: [PATCH] mutter: inexact scales and true refresh on a handheld panel
 
 The Duo 2's 1344x1892 panels want Android's density for them, scale 2.5,
 which does not divide them exactly, so Mutter never offers it. Adds
@@ -7,29 +7,35 @@ patches/mutter/0030 (on a handheld, offer such scales with the logical size
 rounded, verify a configuration of that size, never pick one by itself) to
 Luma's Mutter series, under its own release.
 
+The panels' command-mode modes also carry a link clock that works out at
+43.57 Hz for both the 60 and 90 Hz modes, so Mutter's frame clock ran at
+43.57 Hz. Adds patches/mutter/0031 (trust the mode's vrefresh when the
+computed rate is more than a hertz off).
+
 diff --git a/patches/mutter/0000-luma-fedora-spec.patch b/patches/mutter/0000-luma-fedora-spec.patch
-index 651b1c40..710a6ad9 100644
+index 651b1c40..4dadf60c 100644
 --- a/patches/mutter/0000-luma-fedora-spec.patch
 +++ b/patches/mutter/0000-luma-fedora-spec.patch
 @@ -1,11 +1,11 @@
  --- a/mutter.spec
  +++ b/mutter.spec
 -@@ -29,13 +29,44 @@
-+@@ -29,13 +29,45 @@
++@@ -29,13 +29,46 @@
   
   Name:          mutter
   Version:       50.4
  -Release:       %autorelease
 -+Release:       1.luma.20%{?dist}
-++Release:       1.luma.20.duo2.1%{?dist}
+++Release:       1.luma.20.duo2.2%{?dist}
   Summary:       Window and compositing manager based on Clutter
   
   # Automatically converted from old format: GPLv2+ - review is highly recommended.
-@@ -43,6 +43,7 @@
+@@ -43,6 +43,8 @@
  +Patch1026:     0027-cogl-Scissor-journal-draws-to-what-they-cover.patch
  +Patch1027:     0028-clutter-actor-Do-not-redraw-the-whole-stage-for-a-first-paint.patch
  +Patch1028:     0029-stage-impl-Clip-compact-damage-with-the-scissor-alone.patch
 ++Patch1029:     0030-monitor-Offer-inexact-scales-on-a-handheld-panel.patch
+++Patch1030:     0031-kms-utils-Trust-the-modes-vertical-refresh-over-its-clock.patch
   
   
   BuildRequires: cvt
@@ -154,3 +160,55 @@ index 00000000..aa3c454f
 +             continue;
 + 
 +           /* Eliminate equivalent fractions (duplicate scales) */
+diff --git a/patches/mutter/0031-kms-utils-Trust-the-modes-vertical-refresh-over-its-clock.patch b/patches/mutter/0031-kms-utils-Trust-the-modes-vertical-refresh-over-its-clock.patch
+new file mode 100644
+index 00000000..08f9fab9
+--- /dev/null
++++ b/patches/mutter/0031-kms-utils-Trust-the-modes-vertical-refresh-over-its-clock.patch
+@@ -0,0 +1,46 @@
++From: none24smu <210309088+none24smu@users.noreply.github.com>
++Subject: [PATCH] kms-utils: Trust a mode's vertical refresh over its clock
++
++Mutter derives a mode's refresh rate from its pixel clock and totals. A
++command-mode panel paces itself by its tearing-effect signal, and Qualcomm's
++downstream SDE driver gives such modes a link clock unrelated to that: the
++Surface Duo 2's 60 and 90 Hz modes both work out at 43.57 Hz, so the frame
++clock ran at 43.57 Hz and animations stuttered. When the computed rate is
++more than a hertz away from the mode's own vrefresh, use vrefresh; a driver
++that fills both in consistently (vrefresh is the rounded rate) is unaffected.
++
++---
++diff --git a/src/backends/native/meta-kms-utils.c b/src/backends/native/meta-kms-utils.c
++--- a/src/backends/native/meta-kms-utils.c
+++++ b/src/backends/native/meta-kms-utils.c
++@@ -27,6 +27,8 @@
++ {
++   double numerator;
++   double denominator;
+++  double refresh_rate;
+++  double difference;
++ 
++   if (drm_mode->htotal <= 0 || drm_mode->vtotal <= 0)
++     return 0.0;
++@@ -35,8 +37,20 @@
++   denominator = (double) drm_mode->vtotal * drm_mode->htotal;
++   if (drm_mode->vscan > 1)
++     denominator *= drm_mode->vscan;
+++  refresh_rate = numerator / denominator;
++ 
++-  return (float) (numerator / denominator);
+++  /*
+++   * A command-mode panel paces itself by its tearing-effect signal, and some
+++   * drivers (Qualcomm's downstream SDE) give its modes a link clock that
+++   * says nothing about that: the Surface Duo 2's 60 and 90 Hz modes both
+++   * work out at 43.57 Hz. The mode's own vertical refresh is then the true
+++   * rate; a driver that fills it in consistently is never off by a hertz.
+++   */
+++  difference = refresh_rate - drm_mode->vrefresh;
+++  if (drm_mode->vrefresh > 0 && (difference > 1.0 || difference < -1.0))
+++    return (float) drm_mode->vrefresh;
+++
+++  return (float) refresh_rate;
++ }
++ 
++ int64_t
