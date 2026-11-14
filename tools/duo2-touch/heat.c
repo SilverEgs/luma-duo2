@@ -233,7 +233,8 @@ out:
 // [-limit, 2 * limit], clamped to the limit. DetectedArray adds the offset of
 // region GetRegionIdx(topology 1) = 1, which is the one at 16.
 int heat_cfg_load_alignment(struct heat_cfg *c, const char *file, char *err, size_t errlen) {
-    c->align_mm = 0.0f;
+    c->align_mm = c->align_pair[0] = c->align_pair[1] = 0.0f;
+    c->align_loaded = 0;
     if (!c->align_enabled) return 0;
     uint8_t rec[24];
     FILE *f = fopen(file, "rb");
@@ -241,9 +242,12 @@ int heat_cfg_load_alignment(struct heat_cfg *c, const char *file, char *err, siz
     size_t got = fread(rec, 1, sizeof rec, f);
     fclose(f);
     if (got != sizeof rec) { snprintf(err, errlen, "%s: not a 24-byte alignment record", file); return -1; }
-    float v = rdf(rec + 16) * 0.001f, lim = c->align_limit;
-    if (!(-lim <= v && v <= lim + lim)) { snprintf(err, errlen, "%s: offset %.3f mm out of range", file, (double)v); return -1; }
-    c->align_mm = v <= lim ? v : lim;
+    float lim = c->align_limit, v[2] = { rdf(rec + 20) * 0.001f, rdf(rec + 16) * 0.001f };
+    for (int i = 0; i < 2; i++)
+        if (!(-lim <= v[i] && v[i] <= lim + lim)) { snprintf(err, errlen, "%s: offset %.3f mm out of range", file, (double)v[i]); return -1; }
+    for (int i = 0; i < 2; i++) c->align_pair[i] = v[i] <= lim ? v[i] : lim;
+    c->align_mm = c->align_pair[1];
+    c->align_loaded = 1;
     return 0;
 }
 

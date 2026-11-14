@@ -66,6 +66,10 @@ struct heat_cfg {
     float align_limit;
     int align_enabled;
     float align_mm;               // added to DetectedArray's x offset
+    // Both offsets as the feedback to the digitizer carries them
+    // (GetPanelAlignmentOffsetsPtr: record +20, then +16, mm, clamped).
+    float align_pair[2];
+    int align_loaded;
 
     // The rest of the tuning the tracker reads (tracks.c), kept whole:
     // TouchDetectionCfg (PSDB 0xef4) and the pieces TouchDetection::Init

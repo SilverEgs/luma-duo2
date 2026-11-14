@@ -13,6 +13,8 @@
 //
 // --align FILE: the unit's two-panel alignment record (default
 // /var/lib/luma-duo2/touch/TwoPanelAlignment.bin, copied from sfpd).
+// --host-id FILE: where the digitizer's host id is kept (default
+// /var/lib/luma-duo2/touch/FastHostId; made on first start, as stock does).
 
 #include "heat.h"
 
@@ -36,6 +38,7 @@
 
 #define DEFAULT_LIB "/usr/lib/luma-duo2/touch/lib64/libsurfacetouch_c1.so"
 #define DEFAULT_ALIGN "/var/lib/luma-duo2/touch/TwoPanelAlignment.bin"
+#define DEFAULT_HOST_ID "/var/lib/luma-duo2/touch/FastHostId"
 #define SPI_READY "/sys/bus/spi/devices/spi0.0/ready"
 #define REPORT_LEFT 0x3c
 #define REPORT_RIGHT 0x0a
@@ -194,6 +197,60 @@ static int find_hidraw(char *path, size_t len) {
     return found;
 }
 
+// PenProcessingManager::InitFastHostId: two bytes, little-endian, kept in
+// the state directory; the first start picks one (rand() & 0x3ff after
+// srand(time)) and saves it.
+static unsigned fast_host_id(const char *file) {
+    uint8_t b[2];
+    FILE *f = fopen(file, "rb");
+    if (f) {
+        size_t got = fread(b, 1, sizeof b, f);
+        fclose(f);
+        if (got == sizeof b) return b[0] | b[1] << 8;
+    }
+    srand((unsigned)time(NULL));
+    unsigned id = (unsigned)rand() & 0x3ff;
+    b[0] = id & 0xff; b[1] = id >> 8;
+    f = fopen(file, "wb");
+    if (!f || fwrite(b, 1, sizeof b, f) != sizeof b) log_msg("host id: cannot save %s: %s", file, strerror(errno));
+    if (f) fclose(f);
+    return id;
+}
+
+// What the stock library tells the digitizer when it starts, through the
+// service's send-message-to-touch-firmware hook (a hidraw write of a
+// 186-byte output report), in the order it does so with both panels on:
+// FeedbackManager::SendSwitchModeFeedback (report 5, mode 1) from
+// InitPenTouchMw; then from OnDeviceAttached and each panel's
+// OnDisplayChange, SendDisplayStatesFeedback (report 9, 8E A1 then the
+// display states UpdateDisplayStates fills) with a second switch-mode
+// message in between, which reuses the same buffer, so all but its first
+// two bytes are the display states. Without these the digitizer drops
+// single frames in the middle of a touch.
+#define FW_MSG_LEN 186
+static void send_fw_feedback(int fd, const struct heat_cfg *c, unsigned host_id) {
+    uint8_t sw[FW_MSG_LEN] = { 0x05, 0x01 }, ds[FW_MSG_LEN] = { 0x09, 0x8e, 0xa1 };
+    uint8_t *p = ds + 3;
+    p[0] = 0x03;                          // displays on: bit 0 left, bit 1 right
+    p[1] = 0;                             // not stitched
+    p[2] = 400 & 0xff; p[3] = 400 >> 8;   // hinge angle: none known, the default 400
+    // p[6..13]: keyboard region, none.
+    if (c->align_loaded) {
+        memcpy(p + 14, &c->align_pair[0], 4);
+        memcpy(p + 18, &c->align_pair[1], 4);
+        p[22] = 1;
+    }
+    // p[23..31]: no trackpad.
+    p[38] = host_id & 0xff; p[39] = host_id >> 8;
+    uint8_t sw2[FW_MSG_LEN];
+    memcpy(sw2, ds, sizeof sw2);
+    sw2[0] = 0x05; sw2[1] = 0x01;
+    const uint8_t *msgs[] = { sw, ds, sw2, ds, ds };
+    for (unsigned i = 0; i < sizeof msgs / sizeof msgs[0]; i++)
+        if (write(fd, msgs[i], FW_MSG_LEN) != FW_MSG_LEN)
+            log_msg("firmware message %u (report %u): %s", i, msgs[i][0], strerror(errno));
+}
+
 static int wait_ready(int timeout_ms) {
     for (int waited = 0; waited <= timeout_ms; waited += 50) {
         char s[16] = { 0 };
@@ -294,17 +351,18 @@ static int replay(const struct heat_cfg *c, const char *file) {
 }
 
 int main(int argc, char **argv) {
-    const char *lib = DEFAULT_LIB, *align = DEFAULT_ALIGN, *hidraw = NULL, *replay_file = NULL;
+    const char *lib = DEFAULT_LIB, *align = DEFAULT_ALIGN, *host_id_file = DEFAULT_HOST_ID, *hidraw = NULL, *replay_file = NULL;
     int test_input = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--lib") && i + 1 < argc) lib = argv[++i];
         else if (!strcmp(argv[i], "--hidraw") && i + 1 < argc) hidraw = argv[++i];
         else if (!strcmp(argv[i], "--replay") && i + 1 < argc) replay_file = argv[++i];
         else if (!strcmp(argv[i], "--align") && i + 1 < argc) align = argv[++i];
+        else if (!strcmp(argv[i], "--host-id") && i + 1 < argc) host_id_file = argv[++i];
         else if (!strcmp(argv[i], "--probe")) g_probe = stdout;
         else if (!strcmp(argv[i], "--test-input")) test_input = 1;
         else if (!strcmp(argv[i], "-v")) g_verbose = 1;
-        else { log_msg("usage: %s [--lib LIB] [--align FILE] [--hidraw DEV] [--replay FILE [--probe]] [--test-input] [-v]", argv[0]); return 2; }
+        else { log_msg("usage: %s [--lib LIB] [--align FILE] [--host-id FILE] [--hidraw DEV] [--replay FILE [--probe]] [--test-input] [-v]", argv[0]); return 2; }
     }
     setvbuf(stderr, NULL, _IOLBF, 0);
     struct heat_cfg cfg;
@@ -333,6 +391,7 @@ int main(int argc, char **argv) {
     if (wait_ready(10000) < 0) { log_msg("%s never became ready", SPI_READY); return 1; }
     // Heat mode (feature report 5, vendor usage 0xC8 = 1) and both panels on
     // (output report 0x38: bit 0 left, bit 1 right), as on Android.
+    send_fw_feedback(fd, &cfg, fast_host_id(host_id_file));
     const uint8_t mode[2] = { 0x05, 0x01 }, on[2] = { 0x38, 0x03 };
     if (ioctl(fd, HIDIOCSFEATURE(sizeof mode), mode) < 0) log_msg("heat mode: %s", strerror(errno));
     if (write(fd, on, sizeof on) != (ssize_t)sizeof on) log_msg("display state: %s", strerror(errno));
