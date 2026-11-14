@@ -1,0 +1,400 @@
+#!/usr/bin/python3 -I
+"""Luma Duo 2: the QCA6490's Bluetooth half, on /dev/ttyHS0 (docs/wifi-bt.md).
+
+Microsoft's kernel has no serdev, and its hci_qca predates this chip, so
+the kernel cannot set the controller up by itself. This daemon does what
+Android's Bluetooth HAL does instead: it powers the controller through the
+btpower driver's "bt_power" rfkill switch, downloads the ROM patch and NVM
+over HCI vendor commands and moves the link to 3 Mbaud. It then hands the
+tty to the QCA line discipline of Luma's hci_uart.ko (hci_qca, built
+without serdev, which skips its own setup on a line discipline and only
+runs the in-band sleep protocol), where BlueZ finds the controller as hci0.
+
+The bt_power switch is the user's Bluetooth switch: while it is blocked the
+chip is off. When it is unblocked (GNOME's Bluetooth toggle, `rfkill
+unblock bluetooth`, or systemd-rfkill restoring the last state at boot), the
+controller is brought up; when it is blocked again, hci0 is detached. With
+no saved state (the first boot) Bluetooth starts on.
+
+The controller's NVM gets the changes Linux's btqca makes for this family
+(in-band sleep and deep sleep on, the 3 Mbaud UART rate) and the unit's own
+Bluetooth address, from the persist partition (copied to /run by
+luma-duo2-radio-setup).
+"""
+
+import errno
+import fcntl
+import os
+import select
+import struct
+import sys
+import termios
+import time
+
+TTY = "/dev/ttyHS0"
+RFKILL_STATE = "/var/lib/systemd/rfkill"
+FW_DIRS = ("/run/luma-duo2/firmware/bluetooth/image", "/usr/lib/firmware/qca")
+BT_NV = "/run/luma-duo2/radio/bt_nv.bin"
+SPEED, SPEED_CODE = termios.B3000000, 0x0E      # QCA_BAUDRATE_3000000
+
+TIOCPMGET = 0x544D           # msm_geni_serial: vote the UART clocks on
+N_HCI = 15
+HCIUARTSETPROTO = 0x400455C8
+HCIUARTSETFLAGS = 0x400455CB
+HCI_UART_QCA = 8
+IBS_WAKE_IND, IBS_WAKE_ACK, IBS_SLEEP_IND = 0xFD, 0xFC, 0xFE
+
+EDL_PATCH_CMD = 0xFC00
+EDL_PATCH_VER_REQ = 0x19
+EDL_PATCH_TLV_REQ = 0x1E
+EDL_GET_BID_REQ = 0x23
+QCA_SET_BAUDRATE = 0xFC48
+QCA_DISABLE_LOGGING = 0xFC17
+HCI_RESET = 0x0C03
+SEGMENT = 243
+
+
+def log(msg):
+    print(msg, file=sys.stderr, flush=True)
+
+
+# ---------------------------------------------------------------- rfkill --
+
+def bt_power_rfkill():
+    base = "/sys/class/rfkill"
+    for n in os.listdir(base):
+        try:
+            with open(f"{base}/{n}/name") as f:
+                if f.read().strip() == "bt_power":
+                    return f"{base}/{n}"
+        except OSError:
+            pass
+    raise SystemExit("no bt_power rfkill switch -- is btpower.ko loaded?")
+
+
+def rfkill_blocked(path):
+    with open(f"{path}/soft") as s, open(f"{path}/hard") as h:
+        return s.read().strip() != "0" or h.read().strip() != "0"
+
+
+def rfkill_set(path, blocked):
+    with open(f"{path}/soft", "w") as f:
+        f.write("1" if blocked else "0")
+
+
+def saved_state(dev):
+    """systemd-rfkill's saved-state file for a device's rfkill switch."""
+    dev = os.path.realpath(dev)
+    return f"{RFKILL_STATE}/platform-{os.path.basename(dev)}:bluetooth"
+
+
+def hci_saved_unblocked():
+    """hci0 comes and goes with bt_power. When bt_power was just unblocked,
+    the user wants Bluetooth on, so systemd-rfkill must not restore the
+    blocked state it saved for the previous hci0 when the new one appears."""
+    path = saved_state(f"/sys/class/tty/{os.path.basename(TTY)}/device")
+    try:
+        with open(path) as f:
+            if f.read().strip() == "0":
+                return
+        with open(path, "w") as f:
+            f.write("0\n")
+    except OSError:
+        pass
+
+
+def wait_rfkill(path, want_blocked, ev_fd):
+    """Block until the bt_power switch reaches the wanted state."""
+    while rfkill_blocked(path) != want_blocked:
+        select.select([ev_fd], [], [])
+        try:
+            os.read(ev_fd, 64)
+        except BlockingIOError:
+            pass
+
+
+# ------------------------------------------------------------------ UART --
+
+def tty_open():
+    fd = os.open(TTY, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    # Opened non-blocking so a missing carrier cannot hang the open; writes
+    # block from here on (reads only follow select(), with VMIN=VTIME=0).
+    fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+    try:
+        fcntl.ioctl(fd, TIOCPMGET)
+    except OSError as e:
+        log(f"clock vote on {TTY} failed: {e}")
+    tty_mode(fd, termios.B115200, flow=True)
+    termios.tcflush(fd, termios.TCIOFLUSH)
+    return fd
+
+
+def tty_mode(fd, speed, flow):
+    a = termios.tcgetattr(fd)
+    a[0] = 0                                    # iflag
+    a[1] = 0                                    # oflag
+    a[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
+    if flow:
+        a[2] |= termios.CRTSCTS
+    a[3] = 0                                    # lflag
+    a[4] = a[5] = speed
+    a[6][termios.VMIN] = 0
+    a[6][termios.VTIME] = 0
+    termios.tcsetattr(fd, termios.TCSANOW, a)
+
+
+class Hci:
+    def __init__(self, fd):
+        self.fd = fd
+        self.buf = b""
+
+    def cmd(self, opcode, params=b""):
+        os.write(self.fd, struct.pack("<BHB", 1, opcode, len(params)) + params)
+
+    def _fill(self, deadline):
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return False
+        r, _, _ = select.select([self.fd], [], [], left)
+        if not r:
+            return False
+        try:
+            self.buf += os.read(self.fd, 4096)
+        except BlockingIOError:
+            pass
+        return True
+
+    def event(self, timeout):
+        """The next HCI event as (code, params), or None on timeout."""
+        deadline = time.monotonic() + timeout
+        while True:
+            while self.buf and self.buf[0] != 0x04:
+                if self.buf[0] == IBS_WAKE_IND:     # in-band sleep: ack wakes
+                    os.write(self.fd, bytes([IBS_WAKE_ACK]))
+                self.buf = self.buf[1:]             # and skip noise
+            if len(self.buf) >= 3 and len(self.buf) >= 3 + self.buf[2]:
+                code, plen = self.buf[1], self.buf[2]
+                params = self.buf[3:3 + plen]
+                self.buf = self.buf[3 + plen:]
+                return code, params
+            if not self._fill(deadline):
+                return None
+
+    def wait_complete(self, opcode, timeout=2.0):
+        """Command Complete (or Status) for opcode; its return parameters."""
+        deadline = time.monotonic() + timeout
+        while True:
+            ev = self.event(max(0.0, deadline - time.monotonic()))
+            if ev is None:
+                raise TimeoutError(f"no reply to 0x{opcode:04x}")
+            code, p = ev
+            if code == 0x0E and len(p) >= 3 and struct.unpack_from("<H", p, 1)[0] == opcode:
+                return p[3:]
+            if code == 0x0F and len(p) >= 4 and struct.unpack_from("<H", p, 2)[0] == opcode:
+                if p[0]:
+                    raise OSError(f"0x{opcode:04x} failed, status 0x{p[0]:02x}")
+                return b""
+
+    def wait_tlv_ack(self, timeout=2.0):
+        """A TLV download segment is acked by a Command Complete or a VSE."""
+        deadline = time.monotonic() + timeout
+        while True:
+            ev = self.event(max(0.0, deadline - time.monotonic()))
+            if ev is None:
+                raise TimeoutError("no TLV download ack")
+            code, p = ev
+            if code == 0xFF:
+                return
+            if code == 0x0E and len(p) >= 3 and struct.unpack_from("<H", p, 1)[0] == EDL_PATCH_CMD:
+                if len(p) >= 5 and p[3] != 0:
+                    raise OSError(f"TLV segment rejected, status 0x{p[3]:02x}")
+                return
+
+
+# ------------------------------------------------------------ controller --
+
+def read_version(hci, tries=10):
+    for _ in range(tries):
+        hci.cmd(EDL_PATCH_CMD, bytes([EDL_PATCH_VER_REQ]))
+        try:
+            rp = hci.wait_complete(EDL_PATCH_CMD, 0.5)
+        except TimeoutError:
+            continue
+        # cresp, rtype, one byte, then product_id u32, patch u16, rom u16, soc_id u32
+        if len(rp) >= 15 and rp[1] == EDL_PATCH_VER_REQ:
+            product, patch, rom, soc = struct.unpack_from("<IHHI", rp, 3)
+            return product, patch, rom, soc
+    raise TimeoutError("controller does not answer the version request")
+
+
+def read_board_id(hci):
+    hci.cmd(EDL_PATCH_CMD, bytes([EDL_GET_BID_REQ]))
+    try:
+        rp = hci.wait_complete(EDL_PATCH_CMD, 1.0)
+    except (TimeoutError, OSError):
+        return 0
+    if len(rp) >= 5 and rp[1] == EDL_GET_BID_REQ:
+        return (rp[3] << 8) | rp[4]
+    return 0
+
+
+def set_speed(fd, hci):
+    # Hold RTS off while both ends change speed, as hci_qca does.
+    tty_mode(fd, termios.B115200, flow=False)
+    fcntl.ioctl(fd, termios.TIOCMBIC, struct.pack("I", termios.TIOCM_RTS))
+    hci.cmd(QCA_SET_BAUDRATE, bytes([SPEED_CODE]))
+    termios.tcdrain(fd)
+    time.sleep(0.01)
+    tty_mode(fd, SPEED, flow=True)
+    time.sleep(0.05)
+    termios.tcflush(fd, termios.TCIFLUSH)
+    hci.buf = b""
+
+
+def find_fw(*names):
+    for d in FW_DIRS:
+        for n in names:
+            for cand in (n, n.lower(), n.upper().replace("HPNV", "hpnv").replace("HPBTFW", "hpbtfw")):
+                p = os.path.join(d, cand)
+                if os.path.isfile(p):
+                    return p
+    raise FileNotFoundError(f"none of {names} in {FW_DIRS}")
+
+
+def bdaddr():
+    """The unit's address from persist's .bt_nv.bin (NV item 1, LSB first)."""
+    try:
+        d = open(BT_NV, "rb").read()
+    except OSError:
+        return None
+    i = 0
+    while i + 3 <= len(d):
+        item, _, ln = d[i], d[i + 1], d[i + 2]
+        if item == 1 and ln == 6 and i + 9 <= len(d):
+            return d[i + 3:i + 9]
+        i += 3 + ln
+    return None
+
+
+def patch_nvm(data, addr):
+    data = bytearray(data)
+    tl = struct.unpack_from("<I", data, 0)[0]
+    off = 4
+    if tl & 0xFF == 4:                     # enclosing header: use the first set
+        tl = struct.unpack_from("<I", data, 4)[0]
+        off = 8
+    if tl & 0xFF != 2:
+        return bytes(data)
+    length, idx = tl >> 8, 0
+    while idx + 12 <= length:
+        tag, tlen = struct.unpack_from("<HH", data, off + idx)
+        p = off + idx + 12
+        if tag == 2 and tlen == 6 and addr:
+            data[p:p + 6] = addr
+        elif tag == 17 and tlen >= 3:      # HCI transport: in-band sleep, 3 Mbaud
+            data[p] |= 0x80
+            data[p + 1] = SPEED_CODE
+        elif tag == 27 and tlen >= 1:      # deep sleep
+            data[p] |= 0x01
+        idx += 12 + tlen
+    return bytes(data)
+
+
+def download(hci, data, ack_every):
+    pos = 0
+    while pos < len(data):
+        seg = data[pos:pos + SEGMENT]
+        pos += len(seg)
+        last = pos >= len(data) or len(seg) < SEGMENT
+        hci.cmd(EDL_PATCH_CMD, bytes([EDL_PATCH_TLV_REQ, len(seg)]) + seg)
+        if ack_every or last:
+            hci.wait_tlv_ack(5.0 if last else 2.0)
+
+
+def bring_up(fd):
+    hci = Hci(fd)
+    time.sleep(0.1)
+    product, patch, rom, soc = read_version(hci)
+    soc_ver = (soc << 16) | rom
+    rom_ver = ((soc_ver & 0xF00) >> 4) | (soc_ver & 0x0F)
+    log(f"controller: product 0x{product:08x} soc 0x{soc:08x} rom 0x{rom:04x} "
+        f"patch 0x{patch:04x}")
+
+    set_speed(fd, hci)
+    read_version(hci, tries=5)             # still talking at 3 Mbaud?
+
+    rampatch = open(find_fw(f"hpbtfw{rom_ver:02x}.tlv"), "rb").read()
+    mode = rampatch[4 + 10] if len(rampatch) > 14 else 0  # tlv_type_patch.download_mode
+    log(f"downloading rampatch hpbtfw{rom_ver:02x}.tlv ({len(rampatch)} bytes, mode {mode})")
+    download(hci, rampatch, ack_every=(mode == 0))
+
+    bid = read_board_id(hci)
+    names = [f"hpnv{rom_ver:02x}.bin"]
+    if bid not in (0, 0xFFFF):
+        names.insert(0, f"hpnv{rom_ver:02x}.b{bid:02x}")
+    nvm_path = find_fw(*names)
+    addr = bdaddr()
+    nvm = patch_nvm(open(nvm_path, "rb").read(), addr)
+    log(f"downloading NVM {os.path.basename(nvm_path)} (board id 0x{bid:x}, "
+        f"{'unit' if addr else 'default'} address)")
+    download(hci, nvm, ack_every=True)
+
+    time.sleep(0.05)
+    hci.cmd(QCA_DISABLE_LOGGING, bytes([0x14, 0x00]))
+    try:
+        hci.wait_complete(QCA_DISABLE_LOGGING, 1.0)
+    except (TimeoutError, OSError) as e:
+        log(f"disable SoC logging: {e}")
+    hci.cmd(HCI_RESET)
+    hci.wait_complete(HCI_RESET, 3.0)
+
+    # Hand the link to the kernel: QCA line discipline -> hci0.
+    termios.tcflush(fd, termios.TCIOFLUSH)
+    hci_saved_unblocked()
+    fcntl.ioctl(fd, termios.TIOCSETD, struct.pack("i", N_HCI))
+    fcntl.ioctl(fd, HCIUARTSETFLAGS, 0)
+    fcntl.ioctl(fd, HCIUARTSETPROTO, HCI_UART_QCA)
+    log("attached to the QCA line discipline")
+
+
+def main():
+    sw = bt_power_rfkill()
+    first_boot = not os.path.exists(saved_state(os.path.join(sw, "device")))
+    if first_boot or "--power-on" in sys.argv:
+        rfkill_set(sw, False)
+    ev_fd = os.open("/dev/rfkill", os.O_RDONLY | os.O_NONBLOCK)
+    while True:
+        wait_rfkill(sw, False, ev_fd)
+        log("bt_power unblocked: bringing the controller up")
+        fd = None
+        for attempt in range(3):
+            try:
+                fd = tty_open()
+                bring_up(fd)
+                break
+            except (OSError, TimeoutError, FileNotFoundError) as e:
+                log(f"bring-up attempt {attempt + 1} failed: {e}")
+                if fd is not None:
+                    os.close(fd)
+                    fd = None
+                if isinstance(e, FileNotFoundError) or rfkill_blocked(sw):
+                    break
+                # Power-cycle the controller and try again.
+                rfkill_set(sw, True)
+                time.sleep(0.5)
+                rfkill_set(sw, False)
+                time.sleep(0.2)
+        if fd is None:
+            log("controller not brought up; waiting for the next unblock")
+            wait_rfkill(sw, True, ev_fd)
+            continue
+        wait_rfkill(sw, True, ev_fd)
+        log("bt_power blocked: detaching")
+        os.close(fd)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

@@ -1,0 +1,61 @@
+--- a/drivers/bluetooth/hci_qca.c
++++ b/drivers/bluetooth/hci_qca.c
+@@ -1237,6 +1237,17 @@
+ 	int ret;
+ 	int soc_ver = 0;
+ 
++	if (!hu->serdev) {
++		/* Luma Duo 2: attached as a line discipline by
++		 * luma-duo2-bluetooth, which has already downloaded the
++		 * rampatch and NVM and moved the link to the operating speed.
++		 * What is left for this driver is the in-band sleep protocol.
++		 */
++		set_bit(HCI_QUIRK_SIMULTANEOUS_DISCOVERY, &hdev->quirks);
++		set_bit(QCA_IBS_ENABLED, &qca->flags);
++		return 0;
++	}
++
+ 	ret = qca_check_speeds(hu);
+ 	if (ret)
+ 		return ret;
+@@ -1318,7 +1329,7 @@
+ 	.id		= HCI_UART_QCA,
+ 	.name		= "QCA",
+ 	.manufacturer	= 29,
+-	.init_speed	= 115200,
++	.init_speed	= 3000000,
+ 	.oper_speed	= 3000000,
+ 	.open		= qca_open,
+ 	.close		= qca_close,
+@@ -1470,6 +1481,8 @@
+ 	return ret;
+ }
+ 
++/* Luma Duo 2: no serdev in this kernel, so no serdev driver. */
++#if IS_ENABLED(CONFIG_SERIAL_DEV_BUS)
+ static int qca_init_regulators(struct qca_power *qca,
+ 				const struct qca_vreg *vregs, size_t num_vregs)
+ {
+@@ -1592,17 +1605,22 @@
+ 		.of_match_table = qca_bluetooth_of_match,
+ 	},
+ };
++#endif
+ 
+ int __init qca_init(void)
+ {
++#if IS_ENABLED(CONFIG_SERIAL_DEV_BUS)
+ 	serdev_device_driver_register(&qca_serdev_driver);
++#endif
+ 
+ 	return hci_uart_register_proto(&qca_proto);
+ }
+ 
+ int __exit qca_deinit(void)
+ {
++#if IS_ENABLED(CONFIG_SERIAL_DEV_BUS)
+ 	serdev_device_driver_unregister(&qca_serdev_driver);
++#endif
+ 
+ 	return hci_uart_unregister_proto(&qca_proto);
+ }

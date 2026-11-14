@@ -1,0 +1,78 @@
+#!/bin/sh
+# Luma Duo 2: what the QCA6490's Wi-Fi and Bluetooth need from the phone
+# itself, then Wi-Fi (docs/wifi-bt.md).
+#
+# Usage: luma-duo2-radio-setup firmware|wlan
+#   firmware   steps 1 and 2 (luma-duo2-radio-firmware.service)
+#   wlan       step 3 (luma-duo2-wlan.service)
+#
+#  1. The radio firmware stays on the phone's own read-only partitions:
+#     the active slot's modem partition (WLAN firmware, board data,
+#     regulatory database) and bluetooth partition (ROM patch, NVM) are
+#     mounted under /run/luma-duo2/firmware, where the image's
+#     /usr/lib/firmware/qca6490 links point.
+#  2. The unit's Wi-Fi MAC and Bluetooth address are read from the persist
+#     partition with debugfs, which opens it read-only without mounting it,
+#     into /run/luma-duo2/radio.
+#  3. Wi-Fi: cnss2 runs the chip's cold-boot calibration when told the
+#     file system is ready (Android's init.target.rc does the same), and
+#     only then accepts the qcacld-3.0 driver, wlan.ko.
+set -u
+
+FW=/run/luma-duo2/firmware
+RADIO=/run/luma-duo2/radio
+CNSS=/sys/devices/platform/soc/b0000000.qcom,cnss-qca6490
+
+case "${1:-}" in
+firmware) ;;
+wlan) wlan=1 ;;
+*) echo "usage: luma-duo2-radio-setup firmware|wlan" >&2; exit 2 ;;
+esac
+
+if [ -n "${wlan:-}" ]; then
+    # A WLAN firmware crash restarts the chip alone rather than the phone
+    # (the subsystem default is a full restart), and cnss2 recovers it.
+    for s in /sys/bus/msm_subsys/devices/*; do
+        [ "$(cat "$s/name" 2>/dev/null)" = wlan ] && echo RELATED >"$s/restart_level"
+    done
+    echo 1 >"$CNSS/recovery"
+
+    echo 1 >"$CNSS/fs_ready"
+    # The calibration starts asynchronously; cnss2 refuses wlan.ko until it
+    # has begun and then holds the load until it is done.
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        modprobe wlan && exit 0
+        sleep 2
+    done
+    echo "luma-duo2-radio-setup: wlan.ko did not load" >&2
+    exit 1
+fi
+
+slot=$(sed -n 's/.*androidboot\.slot_suffix=\(_[ab]\).*/\1/p' /proc/cmdline)
+
+mount_fw() {   # partition, mount point
+    mountpoint -q "$2" && return 0
+    mkdir -p "$2"
+    mount -t vfat -o ro,nosuid,nodev,noexec,shortname=lower,umask=0222 \
+        "/dev/disk/by-partlabel/$1$slot" "$2" ||
+        echo "luma-duo2-radio-setup: cannot mount $1$slot" >&2
+}
+mount_fw modem "$FW/modem"
+mount_fw bluetooth "$FW/bluetooth"
+
+persist_file() {   # destination, then candidate paths inside persist
+    dst=$1; shift
+    for p in "$@"; do
+        debugfs -R "cat $p" /dev/disk/by-partlabel/persist 2>/dev/null >"$dst.tmp"
+        if [ -s "$dst.tmp" ]; then
+            mv "$dst.tmp" "$dst"
+            return 0
+        fi
+    done
+    rm -f "$dst.tmp"
+    echo "luma-duo2-radio-setup: no $(basename "$dst") in persist" >&2
+}
+mkdir -p "$RADIO"
+chmod 0700 "$RADIO"
+persist_file "$RADIO/wlan_mac.bin" /wlan/wlan_mac.bin /wlan_mac.bin
+persist_file "$RADIO/bt_nv.bin" /bluetooth/.bt_nv.bin

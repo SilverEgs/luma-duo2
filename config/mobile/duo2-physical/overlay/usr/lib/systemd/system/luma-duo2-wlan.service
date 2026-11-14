@@ -1,0 +1,16 @@
+[Unit]
+Description=Luma Duo 2: Wi-Fi (QCA6490 calibration and qcacld-3.0)
+Documentation=https://github.com/none24smu/luma-duo2/blob/main/docs/wifi-bt.md
+Requires=luma-duo2-radio-firmware.service
+After=luma-duo2-radio-firmware.service
+
+[Service]
+# Not a oneshot: the chip's calibration and the driver load take seconds,
+# and nothing in boot has to wait for them (NetworkManager picks up wlan0
+# whenever it appears).
+Type=simple
+RemainAfterExit=yes
+ExecStart=/usr/libexec/luma-duo2-radio-setup wlan
+
+[Install]
+WantedBy=multi-user.target

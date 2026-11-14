@@ -1,0 +1,16 @@
+[Unit]
+Description=Luma Duo 2: Bluetooth (QCA6490 on the high-speed UART)
+Documentation=https://github.com/none24smu/luma-duo2/blob/main/docs/wifi-bt.md
+Requires=luma-duo2-radio-firmware.service
+After=luma-duo2-radio-firmware.service
+Before=bluetooth.service
+
+[Service]
+ExecStartPre=modprobe btpower
+ExecStartPre=modprobe hci_uart
+ExecStart=/usr/libexec/luma-duo2-bluetooth
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

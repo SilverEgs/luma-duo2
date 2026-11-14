@@ -1,0 +1,11 @@
+# Luma Duo 2: keep qcacld-3.0's own interface names (wlan0, p2p0,
+# wifi-aware0) for the QCA6490 (docs/wifi-bt.md). The default policy would
+# give all three the same PCI path name, and whichever registers first would
+# take it. The first matching .link file is the only one applied, so this
+# one, with no Name= or NamePolicy=, leaves the kernel's names in place, and
+# the MAC addresses the driver set from the unit's persist partition.
+[Match]
+Path=platform-1c00000.qcom,pcie-pci-0000:01:00.0
+
+[Link]
+MACAddressPolicy=none

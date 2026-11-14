@@ -122,6 +122,35 @@ install -D -m 0644 "$OVERLAY/usr/lib/udev/rules.d/90-luma-duo2-touch.rules" \
 install -D -m 0755 "$OVERLAY/usr/libexec/luma-duo2-touch-calibration" \
     "$LAYER/usr/libexec/luma-duo2-touch-calibration"
 
+# Wi-Fi and Bluetooth (QCA6490; docs/wifi-bt.md). wlan.ko and hci_uart.ko
+# come from duo2-build-radio-modules.sh, which adds them to $MODULES after
+# duo2-stage-modules.sh; the module copy above carries them into the layer.
+ls "$MODULES"/lib/modules/*/extra/wlan.ko "$MODULES"/lib/modules/*/extra/hci_uart.ko >/dev/null 2>&1 ||
+    die "no radio modules in $MODULES -- run duo2-build-radio-modules.sh after duo2-stage-modules.sh"
+for f in usr/lib/systemd/system/luma-duo2-radio-firmware.service \
+         usr/lib/systemd/system/luma-duo2-wlan.service \
+         usr/lib/systemd/system/luma-duo2-bluetooth.service \
+         usr/lib/systemd/network/10-luma-duo2-wlan.link \
+         usr/lib/modprobe.d/luma-duo2-radio.conf \
+         usr/lib/udev/rules.d/60-luma-duo2-radio-firmware.rules \
+         usr/lib/firmware/wlan/qca_cld/WCNSS_qcom_cfg.ini; do
+    install -D -m 0644 "$OVERLAY/$f" "$LAYER/$f"
+done
+install -D -m 0755 "$OVERLAY/usr/libexec/luma-duo2-radio-setup" "$LAYER/usr/libexec/luma-duo2-radio-setup"
+install -D -m 0755 "$OVERLAY/usr/libexec/luma-duo2-bluetooth" "$LAYER/usr/libexec/luma-duo2-bluetooth"
+# The firmware itself stays on the phone: cnss2 and qcacld find it through
+# links into the partitions and addresses luma-duo2-radio-setup provides at
+# boot under /run/luma-duo2.
+install -d "$LAYER/usr/lib/firmware/qca6490"
+for n in amss.bin amss20.bin m3.bin bdwlan.elf regdb.bin Data20.msc; do
+    ln -sfn "/run/luma-duo2/firmware/modem/image/$n" "$LAYER/usr/lib/firmware/qca6490/$n"
+done
+ln -sfn /run/luma-duo2/radio/wlan_mac.bin "$LAYER/usr/lib/firmware/wlan/qca_cld/wlan_mac.bin"
+install -d "$LAYER/usr/lib/systemd/system/multi-user.target.wants"
+for unit in luma-duo2-radio-firmware luma-duo2-wlan luma-duo2-bluetooth; do
+    ln -sf "../$unit.service" "$LAYER/usr/lib/systemd/system/multi-user.target.wants/$unit.service"
+done
+
 U="$LAYER/usr/lib/systemd/system"
 install -d "$U/multi-user.target.wants" "$U/gdm.service.d"
 cat >"$U/luma-duo2-touch.service" <<'EOF'

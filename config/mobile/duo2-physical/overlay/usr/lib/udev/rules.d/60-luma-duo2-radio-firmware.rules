@@ -1,0 +1,10 @@
+# Luma Duo 2: answer the kernel's firmware fallback requests for the Wi-Fi and
+# Bluetooth chip's optional files at once (docs/wifi-bt.md).
+#
+# Microsoft's kernel has FW_LOADER_USER_HELPER_FALLBACK, so a file that is not
+# on disk is offered to userspace for 60 s before the request fails. Android's
+# ueventd answers those requests immediately; nothing on Luma does. cnss2 asks
+# for a QDSS trace config that no build ships, and while it waits the
+# firmware's boot timer runs out and WLAN goes into recovery.
+SUBSYSTEM=="firmware", ACTION=="add", ENV{FIRMWARE}=="qca6490/*|wlan/*|qca/*", \
+    RUN+="/bin/sh -c 'echo -1 > /sys$devpath/loading'"

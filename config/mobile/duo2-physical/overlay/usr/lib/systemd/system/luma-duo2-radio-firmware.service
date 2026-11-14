@@ -1,0 +1,16 @@
+[Unit]
+Description=Luma Duo 2: Wi-Fi/Bluetooth firmware partitions and unit addresses
+Documentation=https://github.com/none24smu/luma-duo2/blob/main/docs/wifi-bt.md
+DefaultDependencies=no
+After=local-fs.target systemd-udevd.service
+Before=luma-duo2-wlan.service luma-duo2-bluetooth.service
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/luma-duo2-radio-setup firmware
+
+[Install]
+WantedBy=multi-user.target
