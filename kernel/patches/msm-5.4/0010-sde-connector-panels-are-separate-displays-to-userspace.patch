@@ -1,0 +1,46 @@
+--- a/techpack/display/msm/dsi/dsi_drm.c
++++ b/techpack/display/msm/dsi/dsi_drm.c
+@@ -886,6 +886,7 @@ int dsi_connector_get_modes(struct drm_connector *connector, void *data,
+ 	struct drm_display_mode drm_mode;
+ 	struct dsi_display *display = data;
+ 	struct edid edid;
++	bool has_tile;
+ 	unsigned int width_mm = connector->display_info.width_mm;
+ 	unsigned int height_mm = connector->display_info.height_mm;
+ 	const u8 edid_buf[EDID_LENGTH] = {
+@@ -952,7 +953,17 @@ int dsi_connector_get_modes(struct drm_connector *connector, void *data,
+ 
+ 	dsi_drm_update_dtd(&edid, modes, count);
+ 	dsi_drm_update_checksum(&edid);
++	/*
++	 * Luma Duo 2: drm_connector_update_edid_property() also exports the
++	 * TILE property when has_tile is set, and the panels are separate
++	 * displays to userspace (see sde_connector_init). Hide has_tile from
++	 * it; the encoder keeps using it to drive both DSI controllers in
++	 * sync.
++	 */
++	has_tile = connector->has_tile;
++	connector->has_tile = false;
+ 	rc =  drm_connector_update_edid_property(connector, &edid);
++	connector->has_tile = has_tile;
+ 	if (rc)
+ 		count = 0;
+ 	/*
+--- a/techpack/display/msm/sde/sde_connector.c
++++ b/techpack/display/msm/sde/sde_connector.c
+@@ -2856,7 +2856,14 @@ static int _sde_connector_install_properties(struct drm_device *dev,
+ 					drm_mode_create_tile_group(dev,
+ 						dsi_display->panel->dsi_tile_group);
+ 			}
+-			drm_connector_set_tile_property(connector);
++			/*
++			 * Luma Duo 2: the two panels are separate displays to
++			 * userspace. The encoder still uses has_tile to drive
++			 * both DSI controllers in sync, but exporting the TILE
++			 * property makes Mutter merge DSI-1 and DSI-2 into one
++			 * tiled monitor, find no tiled mode, and light only
++			 * DSI-1.
++			 */
+ 		}
+ 
+ 		mutex_lock(&c_conn->base.dev->mode_config.mutex);
