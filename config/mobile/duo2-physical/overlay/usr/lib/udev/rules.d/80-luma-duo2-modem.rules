@@ -5,10 +5,9 @@
 SUBSYSTEM=="uio", ATTR{name}=="rmtfs", SYMLINK+="qcom_rmtfs_uio1", \
     TAG+="systemd", ENV{SYSTEMD_WANTS}+="rmtfs.service"
 
-# rmnet_ipa re-creates its netdev, parentless, at every modem start; give it
-# the IPA device as parent again so ModemManager takes it as the modem's net
-# port (duo2_ipa_netparent, loaded by luma-duo2-modem ready).
+# rmnet_ipa re-creates its netdev at every modem start, without data pipes
+# and without a parent; luma-duo2-modem sets up both again once the modem's
+# QMI services are up (at boot and after a restart of luma-duo2-modem.service
+# it has done so already, and the unit finds nothing left to do).
 ACTION=="add", SUBSYSTEM=="net", KERNEL=="rmnet_ipa[0-9]*", \
-    DEVPATH=="/devices/virtual/*", \
-    TEST=="/sys/module/duo2_ipa_netparent/parameters/reparent", \
-    RUN+="/bin/sh -c 'echo %k > /sys/module/duo2_ipa_netparent/parameters/reparent'"
+    TAG+="systemd", ENV{SYSTEMD_WANTS}+="luma-duo2-modem-net@%k.service"

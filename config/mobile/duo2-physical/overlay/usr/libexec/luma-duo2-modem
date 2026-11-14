@@ -2,9 +2,11 @@
 # Luma Duo 2: the SoC's cellular modem (MPSS) on Microsoft's 5.4 kernel
 # (docs/modem.md).
 #
-# Usage: luma-duo2-modem setup|ready
+# Usage: luma-duo2-modem setup|ready|net IFACE
 #   setup  before the modem boots (luma-duo2-modem-setup.service)
 #   ready  once it has booted (ExecStartPost of luma-duo2-modem.service)
+#   net    for an rmnet_ipa netdev that appears later, after a modem restart
+#          of its own (luma-duo2-modem-net@.service, from the udev rule)
 #
 # setup:
 #  1. The MPSS firmware stays on the phone's own read-only modem partition,
@@ -17,13 +19,21 @@
 #     repairs the property and the driver is bound again. Then its firmware
 #     (ipa_fws) is loaded, as Android's ipa_fws.rc does with "write /dev/ipa 1".
 #
+# ready, and net for each new rmnet_ipa netdev, once the QMI services are up:
+#  4. rmnet_ipa connects its WAN pipes to the IPA only when asked, as
+#     Android's netmgrd does; luma-duo2-ipa-wan asks, once per instance of
+#     the netdev (rmnet_ipa re-creates it at every modem start). The
+#     kernel's rmnet driver (a module here) carries ModemManager's data
+#     links on top of it.
+#  5. ModemManager only takes a Qualcomm SoC modem together with a net port
+#     whose parent driver is "ipa", and opens the modem's data port (QMI
+#     DPM) with the IPA endpoint numbers it finds under that parent;
+#     Microsoft's rmnet_ipa0 has no parent and the vendor IPA no such
+#     attributes. duo2_ipa_netparent provides both, after the QMI services
+#     are up so that ModemManager probes the two ports together.
+#
 # ready:
-#  4. ModemManager only takes a Qualcomm SoC modem together with a net port
-#     whose parent driver is "ipa"; Microsoft's rmnet_ipa0 has no parent.
-#     duo2_ipa_netparent gives it one, after the QMI services are up so that
-#     ModemManager probes both together (a udev rule re-applies it when
-#     rmnet_ipa re-creates the netdev after a modem restart).
-#  5. The GNSS engine emits only Qualcomm's proprietary NMEA until the
+#  6. The GNSS engine emits only Qualcomm's proprietary NMEA until the
 #     standard sentences are selected; geoclue needs GGA and RMC. The
 #     setting would live in the modem's EFS, which rmtfs serves read-only,
 #     so it is applied at every modem start.
@@ -33,6 +43,8 @@ FW=/run/luma-duo2/firmware/modem
 IPA=1e00000.qcom,ipa
 IPADRV=/sys/bus/platform/drivers/ipa
 NETPARENT=/sys/module/duo2_ipa_netparent/parameters/reparent
+IPAWAN=/usr/libexec/luma-duo2-ipa-wan
+STATE=/run/luma-duo2
 
 log() { echo "luma-duo2-modem: $*" >&2; }
 
@@ -75,21 +87,55 @@ setup() {
     exit 0
 }
 
-ready() {
-    # DMS (2) and LOC (16) on the modem's node.
+# Wait up to 90 s for DMS (2), WDA (26) and DPM (47) on the modem's node,
+# plus any given; only a modem without DMS counts as not up.
+qmi_wait() {
     for i in $(seq 90); do
-        qrtr_has 2 && qrtr_has 16 && break
+        ok=1
+        for svc in 2 26 47 "$@"; do
+            qrtr_has "$svc" || { ok=; break; }
+        done
+        [ -n "$ok" ] && return 0
         sleep 1
     done
-    qrtr_has 2 || { log "modem QMI services did not appear"; exit 1; }
+    log "QMI services 2 26 47 $* not all up after 90 s"
+    qrtr_has 2
+}
 
-    if modprobe duo2_ipa_netparent; then
-        for n in /sys/devices/virtual/net/rmnet_ipa*; do
-            [ -e "$n" ] && echo "${n##*/}" >"$NETPARENT"
-        done
-    else
+modules() {
+    modprobe rmnet ||
+        log "no rmnet module: ModemManager cannot create data links"
+    modprobe duo2_ipa_netparent ||
         log "no duo2_ipa_netparent: ModemManager will not take the modem"
-    fi
+}
+
+# Steps 4 and 5 for one rmnet_ipa netdev, serialised with any other caller.
+net_port() {
+    mkdir -p "$STATE"
+    (
+        flock 9
+        idx=$(cat "/sys/class/net/$1/ifindex" 2>/dev/null) ||
+            { log "$1 is gone"; exit 0; }
+        if [ "$(cat "$STATE/ipa-wan.$1" 2>/dev/null)" != "$idx" ]; then
+            if "$IPAWAN" -i "$1" setup; then
+                echo "$idx" >"$STATE/ipa-wan.$1"
+            else
+                log "IPA WAN pipes of $1 not set up: no mobile data"
+            fi
+        fi
+        if [ -e "$NETPARENT" ]; then
+            echo "$1" >"$NETPARENT" || log "could not parent $1 to the IPA"
+        fi
+    ) 9>"$STATE/modem-net.lock"
+}
+
+ready() {
+    qmi_wait 16 || { log "modem QMI services did not appear"; exit 1; }
+
+    modules
+    for n in /sys/class/net/rmnet_ipa*; do
+        [ -e "$n" ] && net_port "${n##*/}"
+    done
 
     for i in 1 2 3 4 5; do
         qmicli -d qrtr://0 --loc-set-nmea-types='gga|rmc|gsv|gsa|vtg' >/dev/null 2>&1 &&
@@ -100,8 +146,16 @@ ready() {
     exit 0
 }
 
+net() {
+    case "$1" in rmnet_ipa*) ;; *) log "not an rmnet_ipa netdev: $1"; exit 2 ;; esac
+    qmi_wait || { log "modem QMI services did not appear"; exit 1; }
+    modules
+    net_port "$1"
+}
+
 case "${1:-}" in
 setup) setup ;;
 ready) ready ;;
-*) echo "usage: luma-duo2-modem setup|ready" >&2; exit 2 ;;
+net) [ $# -eq 2 ] || { echo "usage: luma-duo2-modem net IFACE" >&2; exit 2; }; net "$2" ;;
+*) echo "usage: luma-duo2-modem setup|ready|net IFACE" >&2; exit 2 ;;
 esac

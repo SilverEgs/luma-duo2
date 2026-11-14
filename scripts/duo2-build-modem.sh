@@ -4,13 +4,18 @@
 #
 #   userspace   qrtr's libqrtr, tqftpserv and pd-mapper, each with one patch
 #               from packaging/ for Qualcomm's downstream subsystem/PIL
-#               kernel, built in a Fedora 44 arm64 container (Luma's pinned
+#               kernel, and luma-duo2-ipa-wan (tools/duo2-ipa-wan/), which
+#               connects the vendor IPA's WAN pipes as Android's netmgrd
+#               does; built in a Fedora 44 arm64 container (Luma's pinned
 #               build image, under qemu-user) and staged as a /usr tree in
 #               build/duo2-modem for duo2-compose-ostree.sh to copy.
-#   modules     duo2_ipa_dtfix and duo2_ipa_netparent (kernel/modem/), built
-#               out of tree against the vendor build and signed with its
-#               module key, into the staged module tree's extra/ directory.
-#               Run after duo2-stage-modules.sh, which starts that tree afresh.
+#   modules     duo2_ipa_dtfix and duo2_ipa_netparent (kernel/modem/), and
+#               the kernel's own rmnet driver (drivers/net/ethernet/qualcomm/
+#               rmnet, CONFIG_RMNET is off in Microsoft's configuration) for
+#               ModemManager's data links; built out of tree against the
+#               vendor build and signed with its module key, into the staged
+#               module tree's extra/ directory. Run after
+#               duo2-stage-modules.sh, which starts that tree afresh.
 #
 # Usage: duo2-build-modem.sh
 
@@ -65,6 +70,8 @@ for p in qrtr tqftpserv pd-mapper; do
         git -C "$WORK/src/$p" apply "$f"
     done
 done
+rm -rf "$WORK/src/duo2-ipa-wan"
+cp -a "$LUMA_DUO2_ROOT/tools/duo2-ipa-wan" "$WORK/src/duo2-ipa-wan"
 
 # --- userspace, in a persistent arm64 Fedora container ----------------------
 # A container left from a build with another LUMA_DUO2_MODEM_BUILD mounts the
@@ -83,7 +90,7 @@ if ! docker container inspect "$NAME" >/dev/null 2>&1; then
 fi
 [ "$(docker inspect --format '{{.State.Running}}' "$NAME")" = true ] || docker start "$NAME" >/dev/null
 
-info "building libqrtr, tqftpserv, pd-mapper (qemu-user, slow)"
+info "building libqrtr, tqftpserv, pd-mapper, luma-duo2-ipa-wan (qemu-user, slow)"
 docker exec "$NAME" bash -euc '
     rm -rf /work/root && mkdir -p /work/root
     cd /work/src/qrtr
@@ -104,6 +111,9 @@ docker exec "$NAME" bash -euc '
     make -s CFLAGS="-O2 -g -Wall -I/work/qrtr-root/usr/include" \
         LDFLAGS="-L/work/qrtr-root/usr/lib64 -lqrtr -llzma" >/dev/null
     install -D -m 0755 pd-mapper /work/root/usr/bin/pd-mapper
+    cd /work/src/duo2-ipa-wan
+    gcc -O2 -g -Wall -Wextra -o luma-duo2-ipa-wan luma-duo2-ipa-wan.c
+    install -D -m 0755 luma-duo2-ipa-wan /work/root/usr/libexec/luma-duo2-ipa-wan
     for l in qrtr tqftpserv pd-mapper; do
         install -D -m 0644 /work/src/$l/LICENSE /work/root/usr/share/licenses/luma-duo2-modem/$l.LICENSE
     done
@@ -114,20 +124,28 @@ cp -a "$WORK/root" "$OUT"
 info "userspace staged in $OUT"
 
 # --- kernel modules ----------------------------------------------------------
+kmake() {   # module dir, make arguments...
+    local m="$1"; shift
+    PATH="$CLANG:$VTREE/prebuilts/build-tools/linux-x86/bin:$PATH" \
+    make -C "$KSRC" O="$KOBJ" M="$m" ARCH=arm64 CROSS_COMPILE="$GCC" \
+        REAL_CC="$CLANG/clang" CLANG_TRIPLE=aarch64-linux-gnu- \
+        AR="$CLANG/llvm-ar" LLVM_NM="$CLANG/llvm-nm" NM="$CLANG/llvm-nm" \
+        LD="$CLANG/ld.lld" HOSTCC="$CLANG/clang" -j"$(nproc)" "$@" >/dev/null
+}
 KM="$WORK/kmod"
 rm -rf "$KM"; cp -a "$LUMA_DUO2_ROOT/kernel/modem" "$KM"
-PATH="$CLANG:$VTREE/prebuilts/build-tools/linux-x86/bin:$PATH" \
-make -C "$KSRC" O="$KOBJ" M="$KM" ARCH=arm64 CROSS_COMPILE="$GCC" \
-    REAL_CC="$CLANG/clang" CLANG_TRIPLE=aarch64-linux-gnu- \
-    AR="$CLANG/llvm-ar" LLVM_NM="$CLANG/llvm-nm" NM="$CLANG/llvm-nm" \
-    LD="$CLANG/ld.lld" HOSTCC="$CLANG/clang" -j"$(nproc)" modules >/dev/null
-for m in duo2_ipa_dtfix duo2_ipa_netparent; do
-    dest="$STAGE/lib/modules/$RELEASE/extra/luma-duo2-modem/$m.ko"
+kmake "$KM" modules
+# The kernel's own rmnet, unchanged, from Microsoft's tree.
+RM="$WORK/rmnet"
+rm -rf "$RM"; cp -a "$KSRC/drivers/net/ethernet/qualcomm/rmnet" "$RM"
+kmake "$RM" CONFIG_RMNET=m modules
+for ko in "$KM/duo2_ipa_dtfix.ko" "$KM/duo2_ipa_netparent.ko" "$RM/rmnet.ko"; do
+    dest="$STAGE/lib/modules/$RELEASE/extra/luma-duo2-modem/$(basename "$ko")"
     install -d "$(dirname "$dest")"
-    "$CLANG/llvm-strip" --strip-debug -o "$dest" "$KM/$m.ko"
+    "$CLANG/llvm-strip" --strip-debug -o "$dest" "$ko"
     "$KOBJ/scripts/sign-file" sha1 "$KOBJ/certs/signing_key.pem" \
         "$KOBJ/certs/signing_key.x509" "$dest"
-    info "$m.ko: $(stat -c%s "$dest") bytes"
+    info "$(basename "$ko"): $(stat -c%s "$dest") bytes"
 done
 depmod -b "$STAGE" "$RELEASE"
 info "modules staged in $STAGE/lib/modules/$RELEASE/extra/luma-duo2-modem"

@@ -162,6 +162,9 @@ MODEM="$BUILD/duo2-modem"
 [ -x "$MODEM/usr/bin/pd-mapper" ] || die "no $MODEM -- run duo2-build-modem.sh"
 ls "$MODULES"/lib/modules/*/extra/luma-duo2-modem/duo2_ipa_netparent.ko >/dev/null 2>&1 ||
     die "no modem modules in $MODULES -- run duo2-build-modem.sh after duo2-stage-modules.sh"
+ls "$MODULES"/lib/modules/*/extra/luma-duo2-modem/rmnet.ko >/dev/null 2>&1 ||
+    die "no rmnet module in $MODULES -- run duo2-build-modem.sh after duo2-stage-modules.sh"
+[ -x "$MODEM/usr/libexec/luma-duo2-ipa-wan" ] || die "no luma-duo2-ipa-wan in $MODEM -- run duo2-build-modem.sh"
 ls "$GPUFW"/ipa_fws.mdt >/dev/null 2>&1 || die "no IPA firmware in $GPUFW"
 cp -a --no-preserve=ownership "$MODEM/usr/." "$LAYER/usr/"
 install -m 0644 "$GPUFW"/ipa_fws.* "$LAYER/usr/lib/firmware/"
@@ -172,6 +175,7 @@ for n in modem.mdt $(seq -f 'modem.b%02g' 0 31) modem_pr; do
 done
 for f in usr/lib/systemd/system/luma-duo2-modem-setup.service \
          usr/lib/systemd/system/luma-duo2-modem.service \
+         "usr/lib/systemd/system/luma-duo2-modem-net@.service" \
          usr/lib/systemd/system/pd-mapper.service \
          usr/lib/systemd/system/rmtfs.service.d/50-luma-duo2.conf \
          usr/lib/systemd/system/tqftpserv.service.d/50-luma-duo2.conf \

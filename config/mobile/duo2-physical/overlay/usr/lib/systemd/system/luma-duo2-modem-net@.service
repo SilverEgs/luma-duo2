@@ -1,0 +1,12 @@
+[Unit]
+Description=Luma Duo 2: modem data path on %I
+Documentation=https://github.com/none24smu/luma-duo2/blob/main/docs/modem.md
+# Started by 80-luma-duo2-modem.rules for each new rmnet_ipa netdev. While
+# luma-duo2-modem.service is starting, its own "ready" step does the work;
+# afterwards (the modem restarted by itself) this unit does.
+After=luma-duo2-modem.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/luma-duo2-modem net %I
+TimeoutStartSec=150
