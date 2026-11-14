@@ -98,12 +98,16 @@ install -m 0644 "$SSHPUB" "$L/ssh/root_authorized_keys"
 # Luma packages newer than the nightly, built here with duo2-luma-builder.sh:
 # Mutter with the handheld inexact scales (luma-fixes/0019; the panels' 2.5),
 # and the Shell from Luma's current tree, whose search no longer swallows the
-# on-screen keyboard's taps. Their files go over the nightly's in the layer;
-# the rpmdb still names the nightly's versions.
+# on-screen keyboard's taps. And Fedora's flatpak rebuilt for kernels before
+# 5.8 (duo2-build-flatpak.sh), without which no app installs. Their files go
+# over the nightly's in the layer; the rpmdb still names the nightly's versions.
 UIRPMS="mutter/aarch64/RPMS/mutter-50.4-1.luma.20.duo2.3.fc44.aarch64.rpm
-gnome-shell/RPMS/aarch64/gnome-shell-50.3-1.luma.176.fc44.aarch64.rpm"
+gnome-shell/RPMS/aarch64/gnome-shell-50.3-1.luma.176.fc44.aarch64.rpm
+flatpak-duo2/RPMS/flatpak-1.18.4-1.duo2.1.fc44.aarch64.rpm
+flatpak-duo2/RPMS/flatpak-libs-1.18.4-1.duo2.1.fc44.aarch64.rpm
+flatpak-duo2/RPMS/flatpak-session-helper-1.18.4-1.duo2.1.fc44.aarch64.rpm"
 for rpm in $UIRPMS; do
-    [ -f "$LUMA/build/packages/$rpm" ] || die "no luma/build/packages/$rpm -- build it with duo2-luma-builder.sh"
+    [ -f "$LUMA/build/packages/$rpm" ] || die "no luma/build/packages/$rpm -- build it with duo2-luma-builder.sh (flatpak: duo2-build-flatpak.sh)"
     info "layering $(basename "$rpm")"
 done
 for rpm in $UIRPMS; do

@@ -1,0 +1,70 @@
+From: none24smu <210309088+none24smu@users.noreply.github.com>
+Subject: [PATCH] libglnx: chase: take the mount id from fdinfo before Linux 5.8
+
+glnx_chaseat() compares mount ids to stay within the tree it resolves, and
+asks statx() for them. Kernels before 5.8 do not return STATX_MNT_ID, so
+every chase failed ("statx didn't return all required fields") and with it
+every flatpak install, on the Surface Duo 2's msm-5.4 kernel. The same id
+is in the fd's /proc/self/fdinfo entry (mnt_id, since 3.15); read it there
+when statx() leaves it out, as systemd does.
+
+---
+--- a/subprojects/libglnx/glnx-chase.c
++++ b/subprojects/libglnx/glnx-chase.c
+@@ -10,6 +10,8 @@
+ 
+ #include <fcntl.h>
+ #include <stdint.h>
++#include <stdio.h>
++#include <string.h>
+ #include <sys/mount.h>
+ #include <sys/statfs.h>
+ #include <sys/syscall.h>
+@@ -110,6 +112,29 @@
+   return a->stx_mnt_id == b->stx_mnt_id;
+ }
+ 
++/* Kernels before 5.8 have no STATX_MNT_ID; the mount id is also in the fd's
++ * /proc/self/fdinfo entry ("mnt_id:", since 3.15), as systemd's fallback
++ * reads it. */
++static gboolean
++glnx_chase_fdinfo_mnt_id (int       fd,
++                          uint64_t *out_mnt_id)
++{
++  char path[64];
++  g_autofree char *contents = NULL;
++  const char *p;
++
++  snprintf (path, sizeof path, "/proc/self/fdinfo/%d", fd);
++  if (!g_file_get_contents (path, &contents, NULL, NULL))
++    return FALSE;
++
++  p = strstr (contents, "\nmnt_id:");
++  if (p == NULL)
++    return FALSE;
++
++  *out_mnt_id = g_ascii_strtoull (p + strlen ("\nmnt_id:"), NULL, 10);
++  return TRUE;
++}
++
+ static gboolean
+ glnx_chase_statx (int                 dfd,
+                   int                 additional_flags,
+@@ -124,6 +149,17 @@
+                    error))
+     return FALSE;
+ 
++  if ((buf->stx_mask & (GLNX_STATX_MNT_ID | GLNX_STATX_MNT_ID_UNIQUE)) == 0)
++    {
++      uint64_t mnt_id;
++
++      if (glnx_chase_fdinfo_mnt_id (dfd, &mnt_id))
++        {
++          buf->stx_mnt_id = mnt_id;
++          buf->stx_mask |= GLNX_STATX_MNT_ID;
++        }
++    }
++
+   if ((buf->stx_mask & (GLNX_STATX_TYPE | GLNX_STATX_INO)) !=
+         (GLNX_STATX_TYPE | GLNX_STATX_INO) ||
+       (buf->stx_mask & (GLNX_STATX_MNT_ID | GLNX_STATX_MNT_ID_UNIQUE)) == 0)
