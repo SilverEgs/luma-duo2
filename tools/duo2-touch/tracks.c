@@ -263,15 +263,9 @@ static void classification(const struct heat_cfg *c, const struct heat_tracks *s
 // (Knuth's assignment algorithm on whole-millimetre costs), then
 // UpdateTrackListAccordingToHungarian.
 
-#define HN 48
+#define HN HEAT_HN
 
-struct hungarian {
-    int n;
-    int16_t cost[HN * HN];
-    uint8_t assign[HN * HN];
-};
-
-static void hungarian_init(struct hungarian *h, const uint16_t (*tp)[2], int nt, const uint16_t (*bp)[2], int nb,
+void hungarian_init(struct hungarian *h, const uint16_t (*tp)[2], int nt, const uint16_t (*bp)[2], int nb,
                            uint16_t maxd) {
     h->n = nt > nb ? nt : nb;
     for (int r = 0; r < h->n; r++)
@@ -290,7 +284,7 @@ static void hungarian_init(struct hungarian *h, const uint16_t (*tp)[2], int nt,
         }
 }
 
-static void hungarian_run(struct hungarian *h) {
+void hungarian_run(struct hungarian *h) {
     int n = h->n;
     if (n == 0) return;
     int16_t *cost = h->cost;
@@ -1428,12 +1422,15 @@ int heat_tracks_frame(const struct heat_cfg *c, struct heat_tracks *s, struct he
                       const struct heat_frame *f) {
     init_frame(c, s, f);
     memcpy(s->scan, f->scan, sizeof s->scan);
+    s->scan_us = f->scan_us;
+    if (f->have_nsr) memcpy(s->nsr, f->nsr, sizeof s->nsr);
     s->noise_level = (uint16_t)f->noise;
     d->palm = s->palm;
     s->prev_nblobs = s->cur_nblobs;
     int nd = heat_detect(c, d, f);
     s->cur_nblobs = nd < 0 ? 0 : (uint8_t)d->nblobs;
     s->nout = 0;
+    s->failed = nd < 0;
     if (nd < 0) return 0;
     classification(c, s, d);
 

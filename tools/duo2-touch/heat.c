@@ -218,6 +218,26 @@ int heat_cfg_load(struct heat_cfg *c, const char *library, char *err, size_t err
     for (int a = 0; a < 2; a++)
         for (int k = 0; k < 4; k++) c->stretch[a][k] = rdf(s + 0xc + STRETCH_REGION * 0x20 + 16 * a + 4 * k);
 
+    // TrackLib's tuning. CommonTrackingCfg's bounds (+0x18, +0x1c), which
+    // tracks are clamped to, are each panel's own: x its long side, y its
+    // short one. (The static TrackLib::mpCommonTrackingCfg is the two panels
+    // stitched, 174.56 mm across; the fingers hold their panel's.)
+    memcpy(c->tpp, b + CFG_POSTPROC, sizeof c->tpp);
+    {
+        const uint8_t *sc = b + CFG_STATIC;
+        c->static_type = sc[0];
+        c->nwin = (uint8_t)rd32(sc + ((sc[0] | 2) == 2 ? 0x110 : 0x13c));
+        memcpy(c->row_lut, sc + 0x1e4, sizeof c->row_lut);
+        c->ctc_w = c->size_mm[0];
+        c->ctc_h = c->size_mm[1];
+        c->ctc_scale[0] = (float)c->logical_max[0] / c->size_mm[0];
+        c->ctc_scale[1] = (float)c->logical_max[1] / c->size_mm[1];
+        if ((sc[0] | 2) == 2 || c->nwin == 0 || c->nwin > 16) {
+            snprintf(err, errlen, "PS_CFG_DATA_Zeta: unexpected StaticConfig");
+            goto out;
+        }
+    }
+
     c->align_limit = rdf(b + CFG_ALIGN_LIMIT);
     c->align_enabled = b[CFG_ALIGN_ENABLE] != 0;
     rc = 0;
@@ -266,6 +286,7 @@ int heat_cfg_load_alignment(struct heat_cfg *c, const char *file, char *err, siz
 
 int heat_parse_report(const struct heat_cfg *c, const uint8_t *r, size_t n, struct heat_frame *f) {
     memset(f, 0, sizeof *f);
+    f->scan_us = 10000;
     if (n < 16) return -1;
     f->seq = rd16(r + 1);
     size_t end = (size_t)rd32(r + 3) + 3;
@@ -289,9 +310,15 @@ int heat_parse_report(const struct heat_cfg *c, const uint8_t *r, size_t n, stru
                 uint16_t ss = rd16(sec + p + 2);
                 if ((st == 0 && ss == 0) || p + 4 + ss > size) break;
                 if (st == 0 && ss >= 4) f->ts = rd16(sec + p + 4 + 2);
-                if (st == 50 && ss >= 5 && sec[p + 4 + 4] < 0xb)
+                if (st == 50 && ss >= 5 && sec[p + 4 + 4] < 0xb) {
+                    f->scan_us = rd32(sec + p + 4);
                     memcpy(f->scan, sec + p + 4 + 5,
                            sec[p + 4 + 4] <= ss - 5 ? sec[p + 4 + 4] : (size_t)(ss - 5));
+                }
+                if (st == 4 && ss >= 4 && sec[p + 4] < 0x11) {
+                    f->have_nsr = 1;
+                    for (unsigned i = 0; i < sec[p + 4] && 4 + 4 * i + 2 <= ss; i++) f->nsr[i] = rd16(sec + p + 4 + 4 + 4 * i);
+                }
                 if (st == 4)
                     for (size_t q = 2; q + 2 <= ss; q += 2) {
                         unsigned v = rd16(sec + p + 4 + q);
@@ -538,7 +565,7 @@ static float widest(const struct heat_frame *f, const struct heat_blob *b, int a
             if (m > mx) mx = m;
         }
         float q = sum / mx;
-        best = q <= best ? best : q;
+        best = q > best ? q : best;     // (fcsel gt: a line with nothing, 0/0, never wins)
     }
     return best;
 }

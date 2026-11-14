@@ -82,6 +82,15 @@ struct heat_cfg {
     uint16_t base_byte[2];        // PSDB 0xc94 + 0x14 / + 0x28: padding floor byte
     float pad_fraction;           // PSDB 0xc94 + 8, percent: padding joins junctions above this part of the peak
     uint8_t scan_row[0x9c];       // InitScanWindowLUT (StaticConfig, PSDB 0xcd0): each row's scan window, 0xff none
+
+    // TrackLib (tracklib.c): TouchPostProcessingCfg (PSDB 0x870) whole, the
+    // StaticConfig pieces it reads, and CommonTrackingCfg's derived values.
+    uint8_t tpp[0x320];
+    uint8_t static_type;          // StaticConfig +0: 1 here (row LUT, not edges)
+    uint8_t nwin;                 // StaticConfig +0x13c: scan windows (12)
+    uint8_t row_lut[0x40];        // StaticConfig +0x1e4: antenna row -> scan index
+    float ctc_w, ctc_h;           // CommonTrackingCfg +0x18, +0x1c: the panel's bounds tracks are clamped to (mm)
+    float ctc_scale[2];           // +0x38, +0x3c: logical units per mm, long and short axis
 };
 
 int heat_cfg_load(struct heat_cfg *cfg, const char *library, char *err, size_t errlen);
@@ -97,6 +106,9 @@ struct heat_frame {
     uint8_t image[HEAT_MAX_Y][HEAT_MAX_X];  // [y][x]
     unsigned noise;               // the frequency-noise level CclLogic picks a threshold by
     uint8_t scan[16];             // each scan window's value this frame (sub-section 50; Parser::UpdateScanTimeData)
+    uint32_t scan_us;             // the frame period, us (sub-section 50; 10000 without one)
+    int have_nsr;
+    uint16_t nsr[16];             // each scan window's noise (sub-section 4; Parser::UpdateFrequencyNoiseData)
 };
 
 int heat_parse_report(const struct heat_cfg *cfg, const uint8_t *r, size_t n, struct heat_frame *f);
@@ -266,7 +278,24 @@ struct heat_tracks {
     uint16_t noise_level;         // this frame's noise (CclLogic's)
     uint8_t cur_nblobs;           // this frame's valid blobs
     uint8_t scan[16];             // this frame's scan window values (TouchDetection +0xca28)
+    int failed;                   // detection gave up on this frame (ProcessTouch failure)
+    uint32_t scan_us;             // this frame's period (TouchProcessingInput +0xd818)
+    uint16_t nsr[16];             // the last scan windows' noise (TouchProcessingInput +0xd828, kept until replaced)
 };
+
+// Hungarian::HungarianInitBeforeRun and RunHungarian (tracks.c), shared by
+// TouchDetection's tracker and TrackLib's separation groups: rows are
+// tracks, columns blobs, both whole millimetres; a pair further apart than
+// sqrt(maxd) costs 100, padding 1000. assign[row * n + col] is 1 for the
+// chosen pairs (none when the stock check of the solution fails).
+#define HEAT_HN 48
+struct hungarian {
+    int n;
+    int16_t cost[HEAT_HN * HEAT_HN];
+    uint8_t assign[HEAT_HN * HEAT_HN];
+};
+void hungarian_init(struct hungarian *h, const uint16_t (*tp)[2], int nt, const uint16_t (*bp)[2], int nb, uint16_t maxd);
+void hungarian_run(struct hungarian *h);
 
 void heat_tracks_init(const struct heat_cfg *cfg, struct heat_tracks *t);
 // One frame, as TouchDetection::ProcessTouch: detection (heat_detect),
@@ -275,6 +304,63 @@ void heat_tracks_init(const struct heat_cfg *cfg, struct heat_tracks *t);
 int heat_tracks_frame(const struct heat_cfg *cfg, struct heat_tracks *t, struct heat_detector *d,
                       const struct heat_frame *f);
 void heat_dump_tracks(FILE *out, const struct heat_tracks *t);
+
+// ---------------------------------------------------------------------------
+// TrackLib (tracklib.c): DetectedArray, MatchFingers/TracksArray and the
+// TrackedFinger filters, as the stock library runs them on each panel, up to
+// TracksArray::FillOsReport. A TrackedFinger keeps the stock 0x1f0-byte
+// layout (the code reads parts of a record left from its previous use).
+
+#define TL_FINGERS 20
+#define TL_REPORTS 10
+
+struct tl_finger { uint8_t b[0x1f0]; };
+
+struct tl_entry {                 // one OS report entry (0x18 bytes in the stock report)
+    float x, y, w, h;             // logical units; x across the panel's short side
+    uint16_t id, orientation;
+    uint8_t lift;                 // the contact ends with this entry
+    uint8_t lost;                 // closed because its blob lost its live flag
+};
+
+struct tracklib {
+    struct tl_finger f[TL_FINGERS];
+    int head;                     // TracksArray list, -1 empty
+    int next[TL_FINGERS];         // TrackedFinger +0x190 as indexes
+    int deque_n[TL_FINGERS];      // backward-prediction queue (TrackedFinger +0x110)
+    float deque[TL_FINGERS][8][2];
+    uint8_t nactive, nmatched;    // TracksArray +0x10, +0x11
+    float dt;                     // +0x14
+    uint8_t fast, fast_half;      // +0x18, +0x19
+    uint16_t next_id;             // +0x1a
+    uint8_t edge_lo, edge_hi;     // +0x2708, +0x2709
+    uint8_t mode, prev_mode;      // +0x2718, +0x2719
+    // TrackLib
+    uint16_t last_counter;        // +0x2e68 (CloseOldTracks)
+    uint8_t irr_count, irr_prev;  // +0x2eae, +0x2eaf
+    uint32_t irr_last;            // +0x2eb0 (PrepareIrregularEventForTrackLib)
+    // TuProcessInput's frame fields the stock code keeps between frames.
+    uint32_t pi_dt;               // +8: microseconds since the last frame, as tracking takes it
+    uint8_t pi_code;              // +0xc
+    // SepFingerArray (TrackLib +0xb8): this frame's separation groups, each
+    // the records of one split blob: [0] its label, [1] records, [2] tracks
+    // matched to it.
+    uint8_t sep[15][3];
+    uint8_t nsep;                 // +0x2d
+    float sep_dt;                 // +0x58
+    // This frame's report.
+    struct heat_report det[HEAT_REPORTS];
+    int ndet;
+    struct tl_entry out[TL_REPORTS];
+    int nout;
+};
+
+void tracklib_init(struct tracklib *tl);
+// One frame, after heat_tracks_frame: TouchProcessingManager's irregular
+// event handling and TrackLib::RunTrackingProcess. Fills tl->out.
+int tracklib_frame(const struct heat_cfg *c, struct tracklib *tl, const struct heat_tracks *s, uint16_t counter);
+// The state in stock-ref/heatprobe.cpp's format ("P tf", "P osrep").
+void tracklib_dump(FILE *out, const struct tracklib *tl);
 
 // A detected touch handed to tracking, in the panel's millimetres.
 struct heat_finger {

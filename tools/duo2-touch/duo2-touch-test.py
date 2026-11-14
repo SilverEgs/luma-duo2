@@ -20,6 +20,7 @@ ACTIVE = (81.15, 117.67)             # antenna span, mm
 K = 0.0022203543                     # byte -> magnitude step (TouchDetection::Init)
 IDLE = 180                           # the byte for no signal
 REPORT = {"left": 0x3C, "right": 0x0A}
+REPORT_SIZE = 1000                   # the descriptor's report size; the payload length says how much is used
 
 
 def antenna(f, axis):
@@ -28,7 +29,24 @@ def antenna(f, axis):
     return (mm - (SIZE[axis] - ACTIVE[axis]) / 2) / pitch
 
 
-def report(panel, seq, contacts, peak=0.2, sigma=1.0):
+def cycle(counter, us):
+    """The 0xFF00 section a real report carries after the image: the cycle
+    header with the scan counter and time (sub-section 0), the scan windows'
+    noise (4: 2, the idle level, in each of 12), the frame period and scan
+    times (50), as the digitizer sends them. The tracking stages time and
+    hold contacts by the scan counter."""
+    def sub(t, payload):
+        return struct.pack("<BBH", t, 4, len(payload)) + payload
+    subs = (sub(0, struct.pack("<HHI", 0x0208, counter & 0xFFFF, us & 0xFFFFFFFF))
+            + sub(3, bytes.fromhex("151e0014001d0800"))
+            + sub(4, struct.pack("<BBH", 12, 7, 0) + struct.pack("<12I", *([2] * 12)))
+            + sub(6, bytes(4)) + sub(7, bytes(4))
+            + sub(50, struct.pack("<I", 9990) + bytes([2, 0x0A, 0x0F, 0x5E]))
+            + sub(255, struct.pack("<HH", counter & 0xFFFF, 7)))
+    return struct.pack("<IHB", 7 + len(subs), 0xFF00, 0) + subs
+
+
+def report(panel, seq, contacts, peak=0.2, sigma=1.0, counter=None):
     img = bytearray([IDLE]) * (COLS * ROWS)
     for fx, fy in contacts:
         ax, ay = antenna(fx, 0), antenna(fy, 1)
@@ -38,11 +56,14 @@ def report(panel, seq, contacts, peak=0.2, sigma=1.0):
                 b = max(0, int(round(img[x * ROWS + y] - m / K)))
                 img[x * ROWS + y] = b
     sec = struct.pack("<IHBBII", 16 + len(img), 0x0100, 1, 8, 0, len(img)) + bytes(img)
+    if counter is None:
+        counter = seq
+    sec += cycle(counter, counter * 10000)
     body = b"\0" + sec                      # byte 9, then sections from 10
     head = struct.pack("<BHIH", REPORT[panel], seq & 0xFFFF, 0, 0)
     r = bytearray(head + body)
     struct.pack_into("<I", r, 3, len(r) - 3)
-    return bytes(r)
+    return bytes(r) + bytes(max(0, REPORT_SIZE - len(r)))
 
 
 # After a lift the digitizer keeps scanning for a while (at least 4 and
@@ -55,8 +76,9 @@ def run(panel, path):
     path = list(path) + [[]] * LIFT_FRAMES
     s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     t = time.monotonic()
+    base = int(t * 100)                     # the scan counter runs on between runs, one per 10 ms
     for seq, contacts in enumerate(path):
-        s.sendto(report(panel, seq, contacts), SOCK)
+        s.sendto(report(panel, seq, contacts, counter=base + seq), SOCK)
         t += 0.010
         time.sleep(max(0.0, t - time.monotonic()))
     s.close()

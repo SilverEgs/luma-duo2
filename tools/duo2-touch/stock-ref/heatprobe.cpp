@@ -187,3 +187,103 @@ EXPORT void probe_detected(void *da, void *in) {
                rd<float>(a, 0), rd<float>(a, 4), rd<float>(a, 8), rd<float>(a, 0xc), rd<float>(a, 0x10), a[0x26],
                a[0x2d], a[0x2e], a[0x2f], rd<uint16_t>(a, 0x22));
 }
+
+// TrackLib::RunTrackingProcess (per panel per frame, after DetectedArray's
+// input is ready): its input, then the tracks (TrackedFinger, 20 x 0x1f0 at
+// TrackLib +0x748 +0x20) and the OS report it filled, and once the tracker's
+// configuration (where each TrackedFinger::mp* points in PS_CFG_DATA_Zeta,
+// and CommonTrackingCfg). HEATPROBE_TRACKLIB=1.
+#define SYM_TRACKLIB "_ZN8TrackLib18RunTrackingProcessEP12TuProcessOutP14TuProcessInput"
+static void hex(const uint8_t *p, size_t n) { for (size_t i = 0; i < n; i++) printf("%02x", p[i]); }
+EXPORT void probe_tracklib(uint8_t *tl, uint8_t *out, uint8_t *in) __asm__(SYM_TRACKLIB);
+EXPORT void probe_tracklib(uint8_t *tl, uint8_t *out, uint8_t *in) {
+    static auto real = next<void (*)(uint8_t *, uint8_t *, uint8_t *)>(SYM_TRACKLIB);
+    static int on = getenv("HEATPROBE_TRACKLIB") != nullptr;
+    if (!on) { real(tl, out, in); return; }
+    static void *lib = dlopen("libsurfacetouch_c1.so", RTLD_NOW | RTLD_NOLOAD);
+    static const uint8_t *ps = (const uint8_t *)dlsym(lib, "PS_CFG_DATA_Zeta");
+    static int once;
+    if (!once++) {
+        static const char *names[] = { "mpSmallFingerCfg", "mpMatching", "mpJitterRestrictorConfig", "mpKalmanConfig",
+            "mpVelocitiesConfig", "mpPixel0Cfg", "mpPrediction", "mpProcessStd2", "mpBlobSizeSmoothConfig",
+            "mpNoiseManageConfig", "mpFastMovement", "mpIirCfg" };
+        for (const char *nm : names) {
+            char sym[128];
+            snprintf(sym, sizeof sym, "_ZN13TrackedFinger%zu%sE", strlen(nm), nm);
+            const uint8_t **v = (const uint8_t **)dlsym(lib, sym);
+            const uint8_t *q = v ? *v : nullptr;
+            printf("P tfcfg %s=%p ps+%#lx\n", nm, q, ps && q ? (long)(q - ps) : -1L);
+        }
+        const uint8_t **ct = (const uint8_t **)dlsym(lib, "_ZN8TrackLib19mpCommonTrackingCfgE");
+        if (ct && *ct) { printf("P ctc "); hex(*ct, 0x78); printf("\n"); }
+        printf("P tlstate "); hex(tl + 0x2e68, 0x50); printf("\n");
+        {
+            const uint8_t *t0 = tl + 0x748 + 0x20;
+            printf("P tfptr proj=%u", rd<uint32_t>(t0, 0x198));
+            for (int o = 0x1a0; o <= 0x1e8; o += 8) {
+                const uint8_t *q = rd<const uint8_t *>(t0, o);
+                Dl_info di{};
+                if (q && dladdr(q, &di) && di.dli_sname) printf(" %x=%s+%ld", o, di.dli_sname, (long)(q - (const uint8_t *)di.dli_saddr));
+                else printf(" %x=%p", o, q);
+            }
+            const uint8_t *fl = rd<const uint8_t *>(t0, 0x1b0);
+            if (fl) { printf(" flags1b0="); hex(fl, 8); }
+            const uint8_t *f8 = rd<const uint8_t *>(t0, 0x1b8);
+            if (f8) { printf(" flags1b8="); hex(f8, 8); }
+            printf(" raw="); hex(t0 + 0x190, 0x60); printf("\n");
+        }
+        const uint8_t *ta = tl + 0x748;
+        printf("P tastate "); hex(ta + 0x26f0, 0x30); printf(" sep="); hex(tl + 0xb8, 0x40); printf("\n");
+    }
+    const uint8_t *pi = *(const uint8_t **)in;
+    printf("P tlin f=%02x%02x%02x pi=", in[0x10], in[0x11], in[0x12]); hex(pi, 0xc0); printf("\n");
+    real(tl, out, in);
+    const uint8_t *ta = tl + 0x748;
+    const uint8_t *head = *(const uint8_t *const *)ta;
+    printf("P tastat n=%u head=%d", ta[0x10], head ? (int)((head - (ta + 0x20)) / 0x1f0) : -1);
+    printf(" x="); hex(ta + 0x18, 4); printf(" st="); hex(ta + 0x2718, 4); printf("\n");
+    for (int i = 0; i < 20; i++) {
+        const uint8_t *t = ta + 0x20 + i * 0x1f0;
+        unsigned st = rd<uint32_t>(t, 0xd4);
+        const uint8_t *nx = rd<const uint8_t *>(t, 400);
+        if (!st && !nx && head != t) continue;
+        {   // each panel's CommonTrackingCfg as its fingers hold it (+0x1a0), once per panel
+            static const uint8_t *seen[2];
+            const uint8_t *ct = rd<const uint8_t *>(t, 0x1a0);
+            if (ct && seen[0] != ta && seen[1] != ta) {
+                seen[seen[0] ? 1 : 0] = ta;
+                printf("P tfctc ta=%p ", (const void *)ta); hex(ct, 0x78); printf("\n");
+            }
+        }
+        printf("P tf %d st=%u next=%d pos=%.6f,%.6f rep=%.6f,%.6f id=%u h=", i, st, nx ? (int)((nx - (ta + 0x20)) / 0x1f0) : -1,
+               (double)rd<float>(t, 0), (double)rd<float>(t, 4), (double)rd<float>(t, 8), (double)rd<float>(t, 0xc), rd<uint16_t>(t, 0x158));
+        // all of it but the deque (+0x110..+0x140) and the pointers (+0x190.., +0x198 index, +0x1a0.., +0x1e8)
+        hex(t, 0x110); printf("|"); hex(t + 0x140, 0x50); printf("|"); hex(t + 0x1b0, 0x38); printf("\n");
+    }
+    const uint8_t *rep = *(const uint8_t *const *)out;
+    printf("P osrep n=%u ", rep[0]);
+    for (unsigned i = 0; i < rep[0] && i < 10; i++) {
+        const uint8_t *e = rep + 4 + i * 0x18;
+        printf(" [x=%.6f y=%.6f w=%.6f h=%.6f id=%u o=%u f=%u l=%u]", (double)rd<float>(e, 0), (double)rd<float>(e, 4),
+               (double)rd<float>(e, 8), (double)rd<float>(e, 0xc), rd<uint16_t>(e, 0x10), rd<uint16_t>(e, 0x12), e[0x14], e[0x15]);
+    }
+    printf("\n");
+}
+
+// The matching and preparation inputs TrackLib builds for each frame.
+#define SYM_RUNMATCH "_ZN12MatchFingers11RunMatchingEPK18TracklibMatchingInP14TuProcessInput"
+#define SYM_PREPTRACK "_ZN12MatchFingers15PrepareTrackingEfP25TracklibPrepareTrackingIn"
+EXPORT void probe_runmatch(void *mf, uint8_t *mi, void *in) __asm__(SYM_RUNMATCH);
+EXPORT void probe_runmatch(void *mf, uint8_t *mi, void *in) {
+    static auto real = next<void (*)(void *, uint8_t *, void *)>(SYM_RUNMATCH);
+    static int on = getenv("HEATPROBE_TRACKLIB") != nullptr;
+    if (on) { printf("P mi "); hex(mi, 8); printf(" "); hex(mi + 0x20, 0x10); printf(" dt=%.9g\n", (double)rd<float>(mi, 0x24)); }
+    real(mf, mi, in);
+}
+EXPORT void probe_preptrack(void *mf, float dt, uint8_t *pt) __asm__(SYM_PREPTRACK);
+EXPORT void probe_preptrack(void *mf, float dt, uint8_t *pt) {
+    static auto real = next<void (*)(void *, float, uint8_t *)>(SYM_PREPTRACK);
+    static int on = getenv("HEATPROBE_TRACKLIB") != nullptr;
+    if (on) { printf("P pt dt=%.9g ", (double)dt); hex(pt + 0x10, 0x10); printf("\n"); }
+    real(mf, dt, pt);
+}

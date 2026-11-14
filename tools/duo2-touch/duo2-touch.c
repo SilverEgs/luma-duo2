@@ -77,6 +77,8 @@ struct panel {
     struct heat_tracker tracker;
     struct heat_detector detector;
     struct heat_tracks tracks;        // TouchDetection's tracker (tracks.c)
+    struct tracklib tl;               // TrackLib (tracklib.c)
+    int tl_ready;
     int slot_id[HEAT_MAX_TRACKS];     // tracking id per slot, -1 free
     long long last_frame;
     int touching;
@@ -314,12 +316,23 @@ static int process(const struct heat_cfg *c, struct panel *p, const uint8_t *r, 
                     i, (double)fg[i].x, (double)fg[i].y, (double)fg[i].ax, (double)fg[i].ay, (double)fg[i].radius,
                     fr[i]->type, fr[i]->valid, fr[i]->split, fr[i]->track, fr[i]->count);
     }
-    // Until TrackLib and FillOsReport are reproduced: the valid records go to
-    // the simple contact tracker (the stock stages after this drop the rest).
-    int nv = 0;
-    for (int i = 0; i < nf; i++)
-        if (fr[i]->valid) fg[nv++] = fg[i];
-    return heat_track(c, &p->tracker, fg, nv, k, maxk);
+    // TrackLib, up to TracksArray::FillOsReport. A lift entry is left out,
+    // so panel_report lifts its slot.
+    if (!p->tl_ready) { tracklib_init(&p->tl); p->tl_ready = 1; }
+    int no = tracklib_frame(c, &p->tl, &p->tracks, f.ts);
+    if (g_probe) tracklib_dump(g_probe, &p->tl);
+    int nk = 0;
+    for (int i = 0; i < no && nk < maxk; i++) {
+        const struct tl_entry *e = &p->tl.out[i];
+        if (e->lift) continue;
+        k[nk].id = e->id;
+        k[nk].x = (int)e->x;
+        k[nk].y = (int)e->y;
+        k[nk].major = (int)(e->w > e->h ? e->w : e->h);
+        k[nk].minor = (int)(e->w > e->h ? e->h : e->w);
+        nk++;
+    }
+    return nk;
 }
 
 // Replay a duo2-heatcap recording: records of [u64 CLOCK_MONOTONIC ns][u32 len][bytes].
