@@ -198,6 +198,19 @@ done
 install -D -m 0755 "$OVERLAY/usr/libexec/luma-duo2-modem" "$LAYER/usr/libexec/luma-duo2-modem"
 ln -sf ../luma-duo2-modem.service "$LAYER/usr/lib/systemd/system/multi-user.target.wants/luma-duo2-modem.service"
 
+# Firewall (docs/firewall.md). nf_tables and the nft modules come from
+# duo2-build-netfilter-modules.sh, which adds them to $MODULES after
+# duo2-stage-modules.sh; the module copy above carries them into the layer.
+# The bring-up image trusts the USB link to the workstation (usb0).
+ls "$MODULES"/lib/modules/*/extra/luma-duo2-netfilter/nf_tables.ko >/dev/null 2>&1 ||
+    die "no netfilter modules in $MODULES -- run duo2-build-netfilter-modules.sh after duo2-stage-modules.sh"
+install -D -m 0644 "$OVERLAY/usr/lib/modules-load.d/luma-duo2-netfilter.conf" \
+    "$LAYER/usr/lib/modules-load.d/luma-duo2-netfilter.conf"
+install -D -m 0644 "$OVERLAY/usr/lib/systemd/system/firewalld.service.d/50-luma-duo2.conf" \
+    "$LAYER/usr/lib/systemd/system/firewalld.service.d/50-luma-duo2.conf"
+install -D -m 0644 "$OVERLAY/etc/firewalld/zones/trusted.xml" \
+    "$LAYER/usr/etc/firewalld/zones/trusted.xml"
+
 U="$LAYER/usr/lib/systemd/system"
 install -d "$U/multi-user.target.wants" "$U/gdm.service.d"
 cat >"$U/luma-duo2-touch.service" <<'EOF'

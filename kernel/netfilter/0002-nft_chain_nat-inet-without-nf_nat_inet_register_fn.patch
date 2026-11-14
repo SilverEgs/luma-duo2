@@ -1,0 +1,106 @@
+nft_chain_nat: register inet NAT chains without nf_nat_inet_register_fn
+
+nf_nat_inet_register_fn() is built into nf_nat_proto.c only with
+CONFIG_NF_TABLES_INET and CONFIG_NFT_NAT, both off in Microsoft's
+configuration. Do the same with the exported per-family functions and a
+per-family copy of the chain's hook ops.
+
+--- a/net/netfilter/nft_chain_nat.c
++++ b/net/netfilter/nft_chain_nat.c
+@@ -1,6 +1,9 @@
+ // SPDX-License-Identifier: GPL-2.0
+ 
+ #include <linux/module.h>
++#include <linux/slab.h>
++#include <linux/list.h>
++#include <linux/mutex.h>
+ #include <linux/netfilter/nf_tables.h>
+ #include <net/netfilter/nf_nat.h>
+ #include <net/netfilter/nf_tables.h>
+@@ -75,14 +78,84 @@
+ #endif
+ 
+ #ifdef CONFIG_NF_TABLES_INET
++/*
++ * Luma Duo 2: nf_nat_inet_register_fn() is only built into the kernel with
++ * CONFIG_NF_TABLES_INET and CONFIG_NFT_NAT, both off in Microsoft's
++ * configuration. It hooks the chain's NFPROTO_INET ops into the IPv6 and
++ * IPv4 NAT hook lists; nf_nat_ipv{4,6}_register_fn() do the same for one
++ * family but take the family from ops->pf, so each gets a copy of the ops
++ * with pf set to its family. The copies are kept until the chain goes away,
++ * since the NAT core finds a hook by its ops pointer when unregistering.
++ */
++struct nft_nat_inet_hook {
++	struct list_head	list;
++	struct net		*net;
++	const struct nf_hook_ops *ops;
++	struct nf_hook_ops	ops4;
++	struct nf_hook_ops	ops6;
++	struct rcu_head		rcu;
++};
++
++static LIST_HEAD(nft_nat_inet_hooks);
++static DEFINE_MUTEX(nft_nat_inet_mutex);
++
+ static int nft_nat_inet_reg(struct net *net, const struct nf_hook_ops *ops)
+ {
+-	return nf_nat_inet_register_fn(net, ops);
++	struct nft_nat_inet_hook *h;
++	int ret;
++
++	if (WARN_ON_ONCE(ops->pf != NFPROTO_INET))
++		return -EINVAL;
++
++	h = kzalloc(sizeof(*h), GFP_KERNEL);
++	if (!h)
++		return -ENOMEM;
++	h->net = net;
++	h->ops = ops;
++	h->ops6 = *ops;
++	h->ops6.pf = NFPROTO_IPV6;
++	h->ops4 = *ops;
++	h->ops4.pf = NFPROTO_IPV4;
++
++	ret = nf_nat_ipv6_register_fn(net, &h->ops6);
++	if (ret)
++		goto err_free;
++	ret = nf_nat_ipv4_register_fn(net, &h->ops4);
++	if (ret) {
++		nf_nat_ipv6_unregister_fn(net, &h->ops6);
++		goto err_free;
++	}
++
++	mutex_lock(&nft_nat_inet_mutex);
++	list_add(&h->list, &nft_nat_inet_hooks);
++	mutex_unlock(&nft_nat_inet_mutex);
++	return 0;
++
++err_free:
++	kfree_rcu(h, rcu);
++	return ret;
+ }
+ 
+ static void nft_nat_inet_unreg(struct net *net, const struct nf_hook_ops *ops)
+ {
+-	nf_nat_inet_unregister_fn(net, ops);
++	struct nft_nat_inet_hook *h, *found = NULL;
++
++	mutex_lock(&nft_nat_inet_mutex);
++	list_for_each_entry(h, &nft_nat_inet_hooks, list) {
++		if (h->net == net && h->ops == ops) {
++			list_del(&h->list);
++			found = h;
++			break;
++		}
++	}
++	mutex_unlock(&nft_nat_inet_mutex);
++
++	if (WARN_ON_ONCE(!found))
++		return;
++
++	nf_nat_ipv4_unregister_fn(net, &found->ops4);
++	nf_nat_ipv6_unregister_fn(net, &found->ops6);
++	kfree_rcu(found, rcu);
+ }
+ 
+ static const struct nft_chain_type nft_chain_nat_inet = {

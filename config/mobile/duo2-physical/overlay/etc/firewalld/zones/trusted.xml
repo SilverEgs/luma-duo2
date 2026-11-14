@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Luma Duo 2 bring-up: the USB network link to the workstation (usb0,
+     172.16.42.1, ssh and DHCP for the workstation) is trusted, as firewalld's
+     own trusted zone with the interface bound to it. NetworkManager leaves
+     USB gadget interfaces unmanaged, so no connection carries a zone for it.
+     docs/firewall.md -->
+<zone target="ACCEPT">
+  <short>Trusted</short>
+  <description>All network connections are accepted.</description>
+  <interface name="usb0"/>
+  <forward/>
+</zone>

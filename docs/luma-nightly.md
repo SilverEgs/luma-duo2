@@ -98,6 +98,10 @@ python3 duo2-shot.py /tmp/home.png
 - Failed units on the first boot, none of them blocking: `luma-grow-root`
   (the initramfs already grew the root), `systemd-sysctl` (keys the 5.4
   kernel lacks), `luma-greenboot-fallback`, `luma-app-baseline`, `firewalld`,
-  `var-lib-nfs-rpc_pipefs.mount`.
+  `var-lib-nfs-rpc_pipefs.mount`. Since fixed in the composed image, except
+  `luma-greenboot-fallback`: grow-root and rpc_pipefs run only where they
+  apply, sysctl gets a swappiness 5.4 accepts, the app baseline installs with
+  the rebuilt flatpak (docs/flatpak.md), and firewalld runs on nf_tables
+  modules (docs/firewall.md).
 - The GPU is not used by GNOME Shell: Mutter renders with llvmpipe (Zink
   cannot find a KGSL device).
