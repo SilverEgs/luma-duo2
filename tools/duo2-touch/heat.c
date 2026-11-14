@@ -40,7 +40,8 @@
 // whose stretching configuration DetectedArray uses.
 #define STRETCH_REGION 1
 
-static float lut[256];
+float heat_lut[256];
+#define lut heat_lut
 
 static void lut_init(void) {
     for (int b = 0; b < 256; b++) {
@@ -99,6 +100,7 @@ static const uint8_t *elf_symbol(const uint8_t *d, size_t n, const char *name, s
 #define CFG_POSTPROC 0x870          // TouchPostProcessingCfg
 #define CFG_STRETCH (CFG_POSTPROC + 0x22c)
 #define CFG_BORDER 0xc94            // TouchDetection +0x16618
+#define CFG_STATIC 0xcd0            // StaticConfig
 #define CFG_DETECT 0xef4            // TouchDetectionCfg (TouchDetection +0x16608)
 #define CFG_RADIUS 0x1da0           // TouchDetection +0x19600
 
@@ -169,6 +171,40 @@ int heat_cfg_load(struct heat_cfg *c, const char *library, char *err, size_t err
     c->halo_ring[0] = rdf(t + 0xfc);
     c->halo_ring[1] = rdf(t + 0x100);
     c->big_blob = rd16(t + 0xe80);
+    c->big_blob_palm = rd16(t + 0xe82);
+    for (int i = 0; i < 10; i++) c->palm_features[i] = rdf(t + 0x49c + 4 * i);
+    memcpy(c->td, t, sizeof c->td);
+    c->match_d2 = rdf(b + CFG_POSTPROC);
+    for (int i = 0; i < 3; i++) c->palm_radius[i] = rdf(b + CFG_POSTPROC + 0x17c + 4 * i);
+    c->radius_iir = rdf(b + CFG_RADIUS);
+    c->close_d2[0] = rdf(b + CFG_BORDER + 0xc);
+    c->close_d2[1] = rdf(b + CFG_BORDER + 0x20);
+    c->base_byte[0] = rd16(b + CFG_BORDER + 0xc + 8);
+    c->base_byte[1] = rd16(b + CFG_BORDER + 0x20 + 8);
+    c->pad_fraction = (float)rd16(b + CFG_BORDER + 8) * 0.01f;
+    // TouchDetection::InitScanWindowLUT: each row takes the first scan
+    // window that lists it. Layout by StaticConfig's type: 0 and 2 list rows
+    // per window and group, the others per window only.
+    {
+        const uint8_t *sc = b + CFG_STATIC;
+        memset(c->scan_row, 0xff, sizeof c->scan_row);
+        if ((sc[0] | 2) == 2) {
+            uint32_t nw = rd32(sc + 4), ng = rd32(sc + 8), ne = rd32(sc + 0xc);
+            for (uint32_t w = 0; w < nw && w < 8; w++)
+                for (uint32_t g = 0; g < ng && g < 8; g++)
+                    for (uint32_t k = 0; k < ne && k < 4; k++) {
+                        uint8_t row = sc[0x10 + w * 0x20 + g * 4 + k];
+                        if (row != 0xff && row < sizeof c->scan_row && w < c->scan_row[row]) c->scan_row[row] = (uint8_t)w;
+                    }
+        } else {
+            uint32_t nw = rd32(sc + 0x138), ne = rd32(sc + 0x13c);
+            for (uint32_t w = 0; w < nw && w < 16; w++)
+                for (uint32_t k = 0; k < ne && k < 16; k++) {
+                    uint8_t row = sc[0x140 + w * 0x10 + k];
+                    if (row != 0xff && row < sizeof c->scan_row && w < c->scan_row[row]) c->scan_row[row] = (uint8_t)w;
+                }
+        }
+    }
     // RunCclForSpecificJunction lets a junction below the strong level join
     // or seed a blob only beside a strong one. Every junction the scan takes
     // is at least the threshold, which is never below the strong level in
@@ -219,7 +255,10 @@ int heat_cfg_load_alignment(struct heat_cfg *c, const char *file, char *err, siz
 //     0x0100 heat image: [6] format (nonzero: 8-bit), [8] u32 start,
 //            [12] u32 count, [16] count bytes, row by row ([y][x])
 //     0xFF00 [7..]: sub-sections [u8 type][u8 flags][u16 size] payload;
-//            type 4 holds the frequency noise levels
+//            type 0 is the cycle header, with the scan counter at 2 (the
+//            frame time TouchDetection keeps, DataProtectedGeneral +4);
+//            type 4 holds the frequency noise levels, type 50 the
+//            scan windows' values ([4] count, from [5])
 
 int heat_parse_report(const struct heat_cfg *c, const uint8_t *r, size_t n, struct heat_frame *f) {
     memset(f, 0, sizeof *f);
@@ -245,6 +284,10 @@ int heat_parse_report(const struct heat_cfg *c, const uint8_t *r, size_t n, stru
                 uint8_t st = sec[p];
                 uint16_t ss = rd16(sec + p + 2);
                 if ((st == 0 && ss == 0) || p + 4 + ss > size) break;
+                if (st == 0 && ss >= 4) f->ts = rd16(sec + p + 4 + 2);
+                if (st == 50 && ss >= 5 && sec[p + 4 + 4] < 0xb)
+                    memcpy(f->scan, sec + p + 4 + 5,
+                           sec[p + 4 + 4] <= ss - 5 ? sec[p + 4 + 4] : (size_t)(ss - 5));
                 if (st == 4)
                     for (size_t q = 2; q + 2 <= ss; q += 2) {
                         unsigned v = rd16(sec + p + 4 + q);
@@ -456,7 +499,7 @@ static int merge_blobs(const struct heat_cfg *c, struct ccl *k) {
 // Blob features (TouchDetection::FeatureExtraction).
 
 // SetBlobOnBorderFlags.
-static void set_border_flags(const struct heat_cfg *c, struct heat_blob *b) {
+static void set_border_flags(const struct heat_cfg *c, struct heat_blob *b, int palm) {
     int xedge = 0;
     b->border = 0;
     if (b->minx == 0) { b->border = 1; xedge = 1; }
@@ -469,7 +512,8 @@ static void set_border_flags(const struct heat_cfg *c, struct heat_blob *b) {
     } else if (xedge) {
         b->on_border = 1;               // (the hinge case needs the stitched topology)
     }
-    float margin = c->border_margin;
+    // Half a junction wider while a palm was seen lately.
+    float margin = palm == 1 ? c->border_margin + 0.5f : c->border_margin;
     if (b->x <= margin || b->y <= margin || (float)(c->cols - 1) - margin <= b->x ||
         (float)(c->rows - 1) - margin <= b->y)
         b->near_border = 1;
@@ -818,16 +862,28 @@ static int features(const struct heat_cfg *c, struct heat_detector *d, const str
             continue;
         }
         if (b->count >= c->max_junctions) return -1;
-        if (b->count >= c->big_blob) {
-            // A palm: no shape features, a fixed radius.
+        if (b->count >= c->big_blob || (b->count >= c->big_blob_palm && d->palm)) {
+            // A palm: no shape features of its own but the palm class's
+            // means, and a fixed radius.
+            const float *m = c->palm_features;
             b->radius = RADIUS_DEFAULT;
             b->x = b->swx / b->sw;
             b->y = b->swy / b->sw;
+            b->count9e = (uint16_t)(int16_t)(int)m[0];
+            b->topo[1] = (uint8_t)(int)m[1];
+            b->topo[3] = (uint8_t)(int)m[2];
+            b->topo[5] = (uint8_t)(int)m[3];
+            b->topo[0] = (uint8_t)(int)m[4];
+            b->topo[2] = (uint8_t)(int)m[5];
+            b->topo[4] = (uint8_t)(int)m[6];
+            b->ratio = m[7];
+            b->spread = m[8];
+            b->halo = 2.0f;
             b->npeaks = b->nvalid_peaks = 1;
             b->big = 1;
             continue;
         }
-        set_border_flags(c, b);
+        set_border_flags(c, b, d->palm);
         set_radius(c, f, b);
         // Second moments about the magnitude centroid, and the peaks.
         float sxx = 0.0f, syy = 0.0f, sxy = 0.0f;
@@ -926,16 +982,19 @@ static float stretch(const struct heat_cfg *c, float p, float r, int a) {
     return p;
 }
 
-int heat_to_mm(const struct heat_cfg *c, float ax, float ay, float radius, struct heat_finger *o) {
+int heat_to_mm(const struct heat_cfg *c, float ax, float ay, float radius, int valid, struct heat_finger *o) {
     o->ax = ax;
     o->ay = ay;
     o->radius = radius;
     // ConvertPositionFromAntennaToMmAndFlip (no edge antennas, no flip).
     float x = ax * c->pitch_mm[0], y = ay * c->pitch_mm[1];
+    // FixOffsetRotation and the stretching apply to valid records only.
     // FixOffsetRotation: the centring offset, plus the unit's alignment on x.
-    x = x - (c->offset_mm[0] + c->align_mm);
-    y = y - c->offset_mm[1];
-    if (c->stretch_on) {
+    if (valid) {
+        x = x - (c->offset_mm[0] + c->align_mm);
+        y = y - c->offset_mm[1];
+    }
+    if (valid && c->stretch_on) {
         // x first; y's stretch uses the same radius.
         float sx = stretch(c, x, radius, 0);
         float sy = stretch(c, y, radius, 1);

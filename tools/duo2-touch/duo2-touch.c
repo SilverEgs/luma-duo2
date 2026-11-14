@@ -73,6 +73,7 @@ struct panel {
     int fd;
     struct heat_tracker tracker;
     struct heat_detector detector;
+    struct heat_tracks tracks;        // TouchDetection's tracker (tracks.c)
     int slot_id[HEAT_MAX_TRACKS];     // tracking id per slot, -1 free
     long long last_frame;
     int touching;
@@ -234,25 +235,32 @@ static int process(const struct heat_cfg *c, struct panel *p, const uint8_t *r, 
     static struct heat_frame f;
     if (heat_parse_report(c, r, n, &f) < 0) return -1;
     struct heat_detector *d = &p->detector;
-    int nd = heat_detect(c, d, &f);
+    int nr = heat_tracks_frame(c, &p->tracks, d, &f);
     if (g_probe) {
-        fprintf(g_probe, "P frame panel=%s\n", p == &g_panels[0] ? "left" : "right");
+        fprintf(g_probe, "P frame panel=%s seq=%u ts=%u\n", p == &g_panels[0] ? "left" : "right", f.seq, f.ts);
         heat_dump_blobs(g_probe, d, &f);
+        heat_dump_tracks(g_probe, &p->tracks);
     }
-    struct heat_finger fg[HEAT_MAX_BLOBS];
+    struct heat_finger fg[HEAT_REPORTS];
+    const struct heat_report *fr[HEAT_REPORTS];
     int nf = 0;
-    for (int i = 0; nd > 0 && i < HEAT_MAX_BLOBS; i++) {
-        const struct heat_blob *b = &d->blob[i];
-        if (b->status != 1 || !b->label) continue;
-        if (heat_to_mm(c, b->x, b->y, b->radius, &fg[nf])) nf++;
+    for (int i = 0; i < nr; i++) {
+        const struct heat_report *rep = &p->tracks.out[i];
+        if (heat_to_mm(c, rep->x, rep->y, rep->radius, rep->valid, &fg[nf])) fr[nf++] = rep;
     }
     if (g_probe) {
-        fprintf(g_probe, "P fingers n=%d\n", nf);
+        if (nr > 0) fprintf(g_probe, "P fingers n=%d\n", nf);
         for (int i = 0; i < nf; i++)
-            fprintf(g_probe, "P finger %d x=%.6f y=%.6f ax=%.6f ay=%.6f r=%.6f\n", i, (double)fg[i].x,
-                    (double)fg[i].y, (double)fg[i].ax, (double)fg[i].ay, (double)fg[i].radius);
+            fprintf(g_probe, "P finger %d x=%.6f y=%.6f ax=%.6f ay=%.6f r=%.6f type=%u valid=%u sep=%u td=%u nsr=%u\n",
+                    i, (double)fg[i].x, (double)fg[i].y, (double)fg[i].ax, (double)fg[i].ay, (double)fg[i].radius,
+                    fr[i]->type, fr[i]->valid, fr[i]->split, fr[i]->track, fr[i]->count);
     }
-    return heat_track(c, &p->tracker, fg, nf, k, maxk);
+    // Until TrackLib and FillOsReport are reproduced: the valid records go to
+    // the simple contact tracker (the stock stages after this drop the rest).
+    int nv = 0;
+    for (int i = 0; i < nf; i++)
+        if (fr[i]->valid) fg[nv++] = fg[i];
+    return heat_track(c, &p->tracker, fg, nv, k, maxk);
 }
 
 // Replay a duo2-heatcap recording: records of [u64 CLOCK_MONOTONIC ns][u32 len][bytes].

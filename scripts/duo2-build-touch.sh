@@ -18,7 +18,7 @@ NAME="${LUMA_DUO2_BUILDER_NAME:-luma-duo2-builder}"
 # No fused multiply-adds: the stock library's arithmetic is reproduced
 # operation for operation (tools/duo2-touch/heat.c).
 CC_FLAGS=(-O2 -Wall -Wextra -std=c11 -D_GNU_SOURCE -ffp-contract=off)
-SOURCES=(duo2-touch.c heat.c)
+SOURCES=(duo2-touch.c heat.c tracks.c)
 
 install -d "$OUT"
 cc="${CROSS_COMPILE:-aarch64-linux-gnu-}gcc"

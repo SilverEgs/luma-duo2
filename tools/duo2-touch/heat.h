@@ -52,6 +52,8 @@ struct heat_cfg {
     float halo_fraction;          // +0xf8: halo junctions are below this part of the peak
     float halo_ring[2];           // +0xfc, +0x100: and at least this part of their inner neighbour
     unsigned big_blob;            // +0xe80: a blob this big is a palm
+    unsigned big_blob_palm;       // +0xe82: ...or this big while a palm is about
+    float palm_features[10];      // +0x49c: what a palm-sized blob's features are taken to be
     float border_margin;          // PSDB 0xc94 + 4: "near the border" in antennas
     float radius_factor;          // PSDB 0x1da0 + 4
 
@@ -64,6 +66,18 @@ struct heat_cfg {
     float align_limit;
     int align_enabled;
     float align_mm;               // added to DetectedArray's x offset
+
+    // The rest of the tuning the tracker reads (tracks.c), kept whole:
+    // TouchDetectionCfg (PSDB 0xef4) and the pieces TouchDetection::Init
+    // points into.
+    uint8_t td[0xec0];
+    float match_d2;               // PSDB 0x870: Hungarian cost cut-off (squared antennas... as the stock compares it)
+    float palm_radius[3];         // PSDB 0x9ec: palm-by-proximity radius (pen, normal, posture)
+    float radius_iir;             // PSDB 0x1da0: track radius smoothing weight
+    float close_d2[2];            // PSDB 0xc94 + 0xc / + 0x20: blobs closer than this are "close"
+    uint16_t base_byte[2];        // PSDB 0xc94 + 0x14 / + 0x28: padding floor byte
+    float pad_fraction;           // PSDB 0xc94 + 8, percent: padding joins junctions above this part of the peak
+    uint8_t scan_row[0x9c];       // InitScanWindowLUT (StaticConfig, PSDB 0xcd0): each row's scan window, 0xff none
 };
 
 int heat_cfg_load(struct heat_cfg *cfg, const char *library, char *err, size_t errlen);
@@ -74,9 +88,11 @@ int heat_cfg_load_alignment(struct heat_cfg *cfg, const char *file, char *err, s
 // One heat frame from a panel, as the digitizer sends it (report 0x0A or 0x3C).
 struct heat_frame {
     uint16_t seq;
+    uint16_t ts;                  // the digitizer's scan counter: one per 10 ms
     int have_image;
     uint8_t image[HEAT_MAX_Y][HEAT_MAX_X];  // [y][x]
     unsigned noise;               // the frequency-noise level CclLogic picks a threshold by
+    uint8_t scan[16];             // each scan window's value this frame (sub-section 50; Parser::UpdateScanTimeData)
 };
 
 int heat_parse_report(const struct heat_cfg *cfg, const uint8_t *r, size_t n, struct heat_frame *f);
@@ -108,6 +124,7 @@ struct heat_blob {
     float ratio, spread, halo;    // 0x8c, 0x90, 0x94
     uint8_t topo[6];              // 0x98: sub-blobs and junctions at three levels
     uint16_t count9e;             // 0x9e
+    float llr[4];                 // 0xa0: log-likelihood of each class (Classification)
 };
 
 // One panel's detector state (TouchDetection).
@@ -118,6 +135,7 @@ struct heat_detector {
     int nrecords;                 // records in use (CclAlgorithmInput +0x3c, plus one)
     int nblobs;                   // +0xf3de: valid blobs
     float thr;                    // +0xc578: this frame's threshold
+    int palm;                     // +0x16580: a palm was seen lately (set by the tracker)
 };
 
 // CclLogic + FeatureExtraction: the blob records for one frame. Returns the
@@ -127,6 +145,133 @@ int heat_detect(const struct heat_cfg *cfg, struct heat_detector *d, const struc
 // The records in the probe format (stock-ref/heatprobe.cpp "P blob").
 void heat_dump_blobs(FILE *out, const struct heat_detector *d, const struct heat_frame *f);
 
+// The magnitude of each heat byte (TouchDetection::Init's table).
+extern float heat_lut[256];
+
+// ---------------------------------------------------------------------------
+// TouchDetection's tracker (tracks.c): blobs to tracks, the classifier, and
+// the records handed on to DetectedArray. The track record keeps the stock
+// layout (TrackDataStruct, 0x25c bytes), because the stock code reads parts
+// of a record left from its previous use, and so does this.
+
+struct heat_hist {                // one frame of a track's history (0x30 bytes)
+    float x, y;                   // 0x00
+    float llr[4];                 // 0x08
+    uint32_t type;                // 0x18: the class this frame
+    uint16_t count;               // 0x1c: junctions
+    uint16_t pad1e;
+    float box[4];                 // 0x20: the blob's box grown by the class margin, moved by the motion
+};
+
+struct heat_trk {                 // TrackDataStruct
+    float x, y;                   // 0x00: antennas
+    float llr[4];                 // 0x08
+    float radius;                 // 0x18: mm, smoothed
+    float vx, vy;                 // 0x1c: motion over the last frame
+    uint16_t minx, miny, maxx, maxy;  // 0x24
+    uint16_t frames;              // 0x2c
+    uint16_t count;               // 0x2e
+    uint16_t blob;                // 0x30: record index of this frame's blob
+    uint16_t orientation;         // 0x32
+    uint16_t reported;            // 0x34: frames in a row handed on
+    uint8_t peak;                 // 0x36: strongest byte seen
+    uint8_t label;                // 0x37
+    uint8_t pad38[4];
+    uint32_t status;              // 0x3c: 0 free, 1 active, 2 suspended, 3 closing, 4 held
+    uint8_t close;                // 0x40: near another blob
+    uint8_t hold;                 // 0x41: frames left to hold or replay
+    uint8_t single;               // 0x42: alone since it started
+    uint8_t near_border;          // 0x43
+    uint8_t one_junction;         // 0x44
+    uint8_t palm_hold;            // 0x45
+    uint8_t suspended;            // 0x46
+    uint8_t matched;              // 0x47
+    int32_t otfc;                 // 0x48
+    uint8_t otfc_count;           // 0x4c
+    uint8_t pad4d[3];
+    float peaks_sum;              // 0x50
+    float peaks_max;              // 0x54
+    uint8_t grip;                 // 0x58
+    uint8_t pad59[3];
+    int32_t grip_count;           // 0x5c
+    struct heat_hist h[10];       // 0x60: ring, current at ring
+    float min_x, min_y, max_x, max_y;  // 0x240: extent travelled
+    uint16_t run_undecided;       // 0x250
+    uint16_t run_decided;         // 0x252
+    uint16_t max_count;           // 0x254
+    uint8_t on_border;            // 0x256
+    uint8_t on_corner;            // 0x257
+    uint8_t off_border;           // 0x258
+    uint8_t ring;                 // 0x259
+    uint8_t pen;                  // 0x25a
+    uint8_t pad25b;
+};
+
+#define HEAT_TRACKS 48
+#define HEAT_REPORTS 0x22
+#define HEAT_PALM_MAP 0x48
+
+// ReportInformation (0x34 bytes): what TouchDetection hands to DetectedArray.
+struct heat_report {
+    float x, y;                   // 0x00: antennas
+    float ax, ay;                 // 0x08: (filled by DetectedArray)
+    float radius;                 // 0x10: mm
+    uint32_t peak;                // 0x14: byte
+    uint16_t minx, miny, maxx, maxy;  // 0x18
+    uint16_t track_count;         // 0x20
+    uint16_t count;               // 0x22
+    uint16_t orientation;         // 0x24
+    uint8_t type;                 // 0x26: 1 a blob, 3 one of a blob's peaks
+    uint8_t label, label2;        // 0x27
+    uint8_t strong;               // 0x29
+    uint8_t window;               // 0x2a
+    uint8_t r2b;                  // 0x2b
+    uint8_t b2c;                  // 0x2c
+    uint8_t valid;                // 0x2d
+    uint8_t split;                // 0x2e
+    uint8_t track;                // 0x2f
+    uint8_t live;                 // 0x30
+    uint8_t peaks;                // 0x31
+    uint8_t near_border;          // 0x32
+    uint8_t pad33;
+};
+
+struct heat_tracks {
+    struct heat_trk t[HEAT_TRACKS];   // +0xf3e0
+    uint8_t nactive;              // +0x16520: tracks active or suspended
+    uint8_t nlive;                // +0x16521: tracks not free
+    uint16_t last_ts;             // +0x1662e
+    uint8_t prev_nblobs;          // +0xf3df
+    uint8_t noisy;                // +0x16534
+    uint16_t palm_left;           // +0x1657a
+    uint16_t now;                 // +0x1657c
+    uint16_t palm_ts;             // +0x1657e
+    uint8_t palm;                 // +0x16580
+    uint8_t npalms;               // +0x16581
+    uint8_t nlist;                // +0x16582
+    uint8_t list[HEAT_TRACKS + 2];    // +0x1654a
+    uint8_t palm_level;           // +0x1652f
+    uint16_t palm_map_ts;         // +0x16630
+    uint8_t palm_map[39][HEAT_PALM_MAP];   // +0xaf80
+    uint8_t palm_pen[39][HEAT_PALM_MAP];   // +0xba78
+    uint8_t tap;                  // +0x19638
+    uint8_t closepairs[0x2d0][2]; // +0xeb58
+    struct heat_report out[HEAT_REPORTS];
+    int nout;
+    int nheld;                    // ProtectedBlobData +2
+    uint16_t noise_level;         // this frame's noise (CclLogic's)
+    uint8_t cur_nblobs;           // this frame's valid blobs
+    uint8_t scan[16];             // this frame's scan window values (TouchDetection +0xca28)
+};
+
+void heat_tracks_init(const struct heat_cfg *cfg, struct heat_tracks *t);
+// One frame, as TouchDetection::ProcessTouch: detection (heat_detect),
+// classification, tracking and the records for DetectedArray (t->out).
+// Returns the number of records.
+int heat_tracks_frame(const struct heat_cfg *cfg, struct heat_tracks *t, struct heat_detector *d,
+                      const struct heat_frame *f);
+void heat_dump_tracks(FILE *out, const struct heat_tracks *t);
+
 // A detected touch handed to tracking, in the panel's millimetres.
 struct heat_finger {
     float x, y;                   // mm after offset, alignment and stretching
@@ -135,8 +280,9 @@ struct heat_finger {
 };
 
 // DetectedArray::ProcessDetectedBlobs for one blob: antennas to millimetres,
-// offset and alignment, edge stretching, crop. Returns 0 if dropped.
-int heat_to_mm(const struct heat_cfg *cfg, float ax, float ay, float radius, struct heat_finger *out);
+// offset and alignment and edge stretching (valid records only), crop.
+// Returns 0 if dropped.
+int heat_to_mm(const struct heat_cfg *cfg, float ax, float ay, float radius, int valid, struct heat_finger *out);
 
 // Contacts as the panel reports them, in its logical units (x across the
 // panel's short side, as the OS report has it).

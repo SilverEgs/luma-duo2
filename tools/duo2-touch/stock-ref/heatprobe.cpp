@@ -7,7 +7,8 @@
 //
 // Also answers IStats::tryGetService with no service (see statsshim.cpp).
 //
-// HEATPROBE_IMAGE=1 also prints every heat image as the library holds it.
+// HEATPROBE_IMAGE=1 also prints every heat image as the library holds it;
+// HEATPROBE_TRACKS=1 the track table and the tracker's output every frame.
 
 #include <dlfcn.h>
 #include <stdint.h>
@@ -43,7 +44,8 @@ EXPORT long probe_process_touch(void *td, uint8_t *in) __asm__(SYM_PROCESS_TOUCH
 EXPORT long probe_process_touch(void *td, uint8_t *in) {
     static auto real = next<long (*)(void *, uint8_t *)>(SYM_PROCESS_TOUCH);
     unsigned cols = rd<uint16_t>(td, 0x16526), rows = rd<uint16_t>(td, 0x16524);
-    printf("P frame td=%p cols=%u rows=%u\n", td, cols, rows);
+    printf("P frame td=%p cols=%u rows=%u ts=%u,%u nz=%u pen=%u post=%u,%u\n", td, cols, rows, rd<uint16_t>(in, 0xb6a8),
+           rd<uint16_t>(in, 0xb6a6), in[0xb6c3], in[0xb7d8], rd<uint32_t>(in, 0xb7cc), ((const uint8_t *)td)[0x19639]);
     static void *seen[4];
     int known = 0;
     for (void *&k : seen) { if (k == td) known = 1; if (!known && !k) { k = td; break; } }
@@ -63,6 +65,9 @@ EXPORT long probe_process_touch(void *td, uint8_t *in) {
         for (int o = 0x16520; o < 0x16660; o += 4)
             if (o < 0x16590 || o >= 0x16608) printf(" %x:%08x/%.9g", o, rd<uint32_t>(td, o), (double)rd<float>(td, o));
         printf("\n");
+        printf("P tdcfg2");
+        for (int o = 0x19600; o < 0x19640; o += 4) printf(" %x:%08x/%.9g", o, rd<uint32_t>(td, o), (double)rd<float>(td, o));
+        printf("\n");
         static const uint8_t *ps = (const uint8_t *)dlsym(dlopen("libsurfacetouch_c1.so", RTLD_NOW | RTLD_NOLOAD), "PS_CFG_DATA_Zeta");
         static const int ptrs[] = { 0x16608, 0x16610, 0x16618, 0x19600 };
         for (int o : ptrs) {
@@ -80,7 +85,40 @@ EXPORT long probe_process_touch(void *td, uint8_t *in) {
             printf("\n");
         }
     }
-    return real(td, in);
+    long rc = real(td, in);
+    static int tracks = getenv("HEATPROBE_TRACKS") != nullptr;
+    if (tracks) {
+        // The track table (48 x 0x25c from +0xf3e0) after
+        // TouchDetectionPostProcess: every track not free.
+        for (int i = 0; i < 48; i++) {
+            const uint8_t *t = (const uint8_t *)td + 0xf3e0 + i * 0x25c;
+            unsigned st = rd<uint32_t>(t, 0x3c);
+            if (!st) continue;
+            unsigned ring = t[0x259];
+            const uint8_t *h = t + 0x60 + ring * 0x30;
+            printf("P trk %d st=%u ty=%u x=%.6f y=%.6f r=%.6f v=%.6f,%.6f fr=%u n=%u blob=%u lab=%u hn=%u f=",
+                   i, st, rd<uint32_t>(h, 0x18), (double)rd<float>(t, 0), (double)rd<float>(t, 4),
+                   (double)rd<float>(t, 0x18), (double)rd<float>(t, 0x1c), (double)rd<float>(t, 0x20),
+                   rd<uint16_t>(t, 0x2c), rd<uint16_t>(t, 0x2e), rd<uint16_t>(t, 0x30), t[0x37], rd<uint16_t>(h, 0x1c));
+            for (int o = 0x40; o < 0x48; o++) printf("%02x", t[o]);
+            printf(" c=%u,%u,%u g=", rd<uint16_t>(t, 0x250), rd<uint16_t>(t, 0x252), rd<uint16_t>(t, 0x254));
+            for (int o = 0x256; o < 0x25c; o++) printf("%02x", t[o]);
+            printf(" llr=%.6f,%.6f,%.6f,%.6f\n", (double)rd<float>(t, 8), (double)rd<float>(t, 0xc),
+                   (double)rd<float>(t, 0x10), (double)rd<float>(t, 0x14));
+        }
+        // FillTrackLibInput's output (ProtectedBlobData at input +0xaf84):
+        // ReportInformation records of 0x34 bytes from +4.
+        const uint8_t *pb = in + 0xaf84;
+        printf("P tl n=%u b2=%u\n", pb[0], pb[2]);
+        for (unsigned i = 0; i < pb[0] && i < 0x22; i++) {
+            const uint8_t *a = pb + 4 + i * 0x34;
+            printf("P tli %u x=%.6f y=%.6f r=%.6f h=", i, (double)rd<float>(a, 0), (double)rd<float>(a, 4),
+                   (double)rd<float>(a, 0x10));
+            for (int o = 0x8; o < 0x34; o++) printf("%02x", a[o]);
+            printf("\n");
+        }
+    }
+    return rc;
 }
 
 // TouchDetection::FeatureExtraction: the blob records (0xb0 bytes from +0xca58).
