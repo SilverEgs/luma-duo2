@@ -703,7 +703,7 @@ static int changed_direct(const struct heat_cfg *c, const struct heat_tracks *s,
         if (j == to) continue;
         if (v - t->llr[j] < tp + extra + (float)ci(c, o + 0x914 + 4 * (int)j)) return 0;
     }
-    return extra + (float)(int)minv <= v;
+    return !(v < extra + (float)(int)minv);  // (cset pl: a NaN likelihood passes)
 }
 
 static int changed_by_history(const struct heat_cfg *c, const struct heat_tracks *s, const struct heat_trk *t,
