@@ -117,6 +117,8 @@ install -D -m 0644 "$OVERLAY/usr/lib/udev/rules.d/70-luma-duo2-gpu.rules" \
     "$LAYER/usr/lib/udev/rules.d/70-luma-duo2-gpu.rules"
 install -D -m 0644 "$OVERLAY/usr/lib/udev/rules.d/90-luma-duo2-touch.rules" \
     "$LAYER/usr/lib/udev/rules.d/90-luma-duo2-touch.rules"
+# Swappiness within what the 5.4 kernel accepts (Luma asks for 180).
+install -D -m 0644 "$OVERLAY/usr/lib/sysctl.d/90-luma-duo2.conf" "$LAYER/usr/lib/sysctl.d/90-luma-duo2.conf"
 # Which panel each backlight drives, for Luma's Mutter (mutter patch 0032).
 install -D -m 0644 "$OVERLAY/usr/lib/udev/rules.d/71-luma-duo2-backlight.rules" \
     "$LAYER/usr/lib/udev/rules.d/71-luma-duo2-backlight.rules"
