@@ -26,7 +26,7 @@ signed with Luma's release key, so the Duo 2 cannot use that path. Instead
 `scripts/duo2-compose-ostree.sh` derives a commit on the workstation:
 
 1. the nightly's commit, unchanged, plus a **Duo 2 layer**: Microsoft's 5.4
-   kernel modules, the Adreno 660 firmware, duo2-touchd and its stock runtime,
+   kernel modules, the Adreno 660 firmware, the native touch daemon duo2-touch,
    Turnip for KGSL (under `/usr/lib/luma-duo2`, since `/opt` is not part of a
    commit), the bring-up services (USB network, SSH by key, serial console,
    the way home), and the handheld profile the FP6's `luma-fp6-platform`

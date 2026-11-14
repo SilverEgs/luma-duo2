@@ -11,7 +11,7 @@
 #
 # Instead this script derives a new commit on the workstation: the nightly's
 # commit plus a Duo 2 layer (Microsoft's 5.4 kernel modules, the Adreno 660
-# firmware, duo2-touchd and its stock runtime, Turnip for KGSL, the bring-up
+# firmware, the native touch daemon duo2-touch, Turnip for KGSL, the bring-up
 # services, and the handheld profile the FP6's luma-fp6-platform carries),
 # labelled with the base commit's own SELinux policy. It deploys that commit
 # as the default beside the nightly's own deployment and writes the whole
@@ -33,14 +33,16 @@ IMAGE="registry.fedoraproject.org/fedora:44"
 OVERLAY="$LUMA_DUO2_ROOT/config/mobile/duo2-physical/overlay"
 
 MODULES="$BUILD/duo2-modules"
-TOUCH="$BUILD/duo2-touch"
+# The stock heat processor, read by duo2-touch for its tuning only.
+TOUCHLIB="$BUILD/stock-vendor/lib64/c1/libsurfacetouch_c1.so"
 TURNIP="$BUILD/mesa-kgsl/opt/mesa-kgsl"
 GPUFW="$BUILD/stock-vendor/firmware"
 TOOLS="$BUILD/tools"
 SSHPUB="$BUILD/ssh/duo2_ed25519.pub"
 
 [ -d "$MODULES/lib/modules" ] || die "no staged modules -- run duo2-stage-modules.sh"
-[ -x "$TOUCH/duo2-touchd" ] || die "no $TOUCH/duo2-touchd -- run duo2-touch-bundle.sh"
+[ -f "$TOUCHLIB" ] || die "no $TOUCHLIB -- extract the stock vendor image (docs/touch.md)"
+[ -x "$TOOLS/duo2-touch" ] || die "no $TOOLS/duo2-touch -- run duo2-build-touch.sh"
 [ -d "$TURNIP" ] || die "no Turnip-KGSL in $TURNIP -- run duo2-build-turnip.sh"
 ls "$GPUFW"/a660_sqe.fw >/dev/null 2>&1 || die "no Adreno 660 firmware in $GPUFW"
 [ -x "$TOOLS/duo2-kmstest" ] || die "no $TOOLS/duo2-kmstest"
@@ -86,8 +88,10 @@ cp -a --no-preserve=ownership "$TURNIP" "$L/mesa-kgsl"
 for icd in "$L"/mesa-kgsl/share/vulkan/icd.d/*.json; do
     sed -i 's#/opt/mesa-kgsl/#/usr/lib/luma-duo2/mesa-kgsl/#g' "$icd"
 done
-# duo2-touchd and the stock runtime it hosts (docs/touch.md).
-cp -a --no-preserve=ownership "$TOUCH" "$L/touch"
+# duo2-touch, and the stock library whose PS_CFG_DATA_Zeta tuning it reads
+# (docs/touch.md). The library is data here; nothing runs it.
+install -m 0755 "$TOOLS/duo2-touch" "$L/bin/duo2-touch"
+install -D -m 0644 "$TOUCHLIB" "$L/touch/lib64/libsurfacetouch_c1.so"
 install -m 0755 "$TOOLS/duo2-kmstest" "$L/bin/duo2-kmstest"
 install -m 0644 "$SSHPUB" "$L/ssh/root_authorized_keys"
 
@@ -96,29 +100,20 @@ install -D -m 0644 "$OVERLAY/usr/lib/udev/rules.d/70-luma-duo2-gpu.rules" \
     "$LAYER/usr/lib/udev/rules.d/70-luma-duo2-gpu.rules"
 install -D -m 0644 "$OVERLAY/usr/lib/udev/rules.d/90-luma-duo2-touch.rules" \
     "$LAYER/usr/lib/udev/rules.d/90-luma-duo2-touch.rules"
-install -D -m 0755 "$OVERLAY/usr/libexec/luma-duo2-touch-calibration" \
-    "$LAYER/usr/libexec/luma-duo2-touch-calibration"
 
 U="$LAYER/usr/lib/systemd/system"
 install -d "$U/multi-user.target.wants" "$U/gdm.service.d"
-cat >"$U/luma-duo2-touchd.service" <<'EOF'
+cat >"$U/luma-duo2-touch.service" <<'EOF'
 [Unit]
-Description=Luma Duo 2: touch through Microsoft's heat processor (duo2-touchd)
+Description=Luma Duo 2: the touchscreens (duo2-touch)
 Documentation=https://github.com/none24smu/luma-duo2/blob/main/docs/touch.md
 # The touchscreens exist before the display manager starts.
 Before=gdm.service display-manager.service
-ConditionPathExists=/usr/lib/luma-duo2/touch/duo2-touchd
 
 [Service]
-# duo2-touchd and the library it hosts are Android programs: run them with the
-# stock linker and runtime libraries assembled by duo2-touch-bundle.sh.
-Environment=LD_LIBRARY_PATH=/usr/lib/luma-duo2/touch/lib64
 # Keep the digitizer powered, as the stock service does on start.
 ExecStartPre=-/bin/sh -c 'echo on > /sys/bus/spi/devices/spi0.0/power/control'
-# The unit's factory two-panel alignment, from its own sfpd partition.
-ExecStartPre=-/usr/libexec/luma-duo2-touch-calibration /var/lib/duo2-touchd
-ExecStart=/usr/lib/luma-duo2/touch/linker64 /usr/lib/luma-duo2/touch/duo2-touchd --lib /usr/lib/luma-duo2/touch/lib64/libsurfacetouch_c1.so --state /var/lib/duo2-touchd
-StateDirectory=duo2-touchd
+ExecStart=/usr/lib/luma-duo2/bin/duo2-touch
 Restart=always
 RestartSec=2
 
@@ -164,7 +159,7 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF
-for unit in luma-duo2-touchd luma-duo2-booted luma-duo2-usb-dhcp sshd; do
+for unit in luma-duo2-touch luma-duo2-booted luma-duo2-usb-dhcp sshd; do
     ln -sf "../$unit.service" "$U/multi-user.target.wants/$unit.service"
 done
 # Bring-up root shell on the USB serial console.
@@ -212,6 +207,27 @@ install -D -m 0644 "$LUMA/config/mobile/environment.d/90-luma-handheld.conf" \
     "$LAYER/usr/lib/environment.d/90-luma-handheld.conf"
 install -m 0644 "$LUMA/config/mobile/luma-shell-handheld.dconf" "$E/dconf/db/luma.d/10-luma-handheld"
 install -m 0644 "$LUMA/config/mobile/luma-greeter-handheld.dconf" "$E/dconf/db/gdm.d/10-luma-handheld"
+# Each touchscreen on its own panel. Both panels carry the same EDID, so
+# Mutter cannot match a touchscreen to its panel by itself: the output is set
+# per touchscreen (by product id: 0C1D left, 0C1E right), and it has to be the
+# user's own value, since Mutter reads a dconf default as "automatic". The
+# fourth field, the connector, tells the twin panels apart.
+install -D -m 0755 /dev/stdin "$LAYER/usr/libexec/luma-duo2-touch-outputs" <<'EOF'
+#!/bin/sh
+# Luma Duo 2: tie each touchscreen to its own panel (duo2-compose-ostree.sh).
+S=org.gnome.desktop.peripherals.touchscreen
+P=/org/gnome/desktop/peripherals/touchscreens
+gsettings set "$S:$P/045e:0c1d/" output "['QCM', '0x0001', '0x00000001', 'DSI-1']"
+gsettings set "$S:$P/045e:0c1e/" output "['QCM', '0x0001', '0x00000001', 'DSI-2']"
+EOF
+install -D -m 0644 /dev/stdin "$E/xdg/autostart/luma-duo2-touch-outputs.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Luma Duo 2 touchscreen outputs
+Exec=/usr/libexec/luma-duo2-touch-outputs
+NoDisplay=true
+X-GNOME-Autostart-Phase=Initialization
+EOF
 # Both panels for the Shell's display geometry (schema 2: several built-in
 # displays by connector). No camera openings on either panel.
 install -d "$LAYER/usr/share/luma"
